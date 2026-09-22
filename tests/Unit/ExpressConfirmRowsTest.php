@@ -17,7 +17,7 @@ declare(strict_types=1);
 */
 
 it('only opens inline editors the template can reveal', function () {
-    $source = file_get_contents(__DIR__.'/../../../packages/checkout/resources/js/pages/ExpressConfirm.vue');
+    $source = file_get_contents(__DIR__.'/../../resources/js/pages/ExpressConfirm.vue');
 
     preg_match_all("/openEdit\('([a-z-]+)'\)/", $source, $opened);
     preg_match_all("/editing\('([a-z-]+)'\)/", $source, $tested);
@@ -27,7 +27,7 @@ it('only opens inline editors the template can reveal', function () {
 });
 
 it('keys the collect row on the pickup editor', function () {
-    $source = file_get_contents(__DIR__.'/../../../packages/checkout/resources/js/pages/ExpressConfirm.vue');
+    $source = file_get_contents(__DIR__.'/../../resources/js/pages/ExpressConfirm.vue');
 
     expect($source)->toContain("openEdit('pickup')")
         ->and($source)->toContain("editing('pickup')");

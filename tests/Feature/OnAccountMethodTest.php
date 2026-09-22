@@ -71,7 +71,7 @@ it('blocks pay until a purchase order reference is entered when the host require
 });
 
 it('wires the on-account notice and the payment blocker into the checkout app', function () {
-    $base = dirname(__DIR__, 3).'/packages/checkout/resources/js';
+    $base = dirname(__DIR__, 2).'/resources/js';
 
     $app = file_get_contents($base.'/app.js');
     $checkout = file_get_contents($base.'/components/LunarCheckout.vue');

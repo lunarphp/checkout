@@ -57,7 +57,9 @@ jobs:
           APP_ENV: testing
           DB_CONNECTION: testing
           DB_DATABASE: ":memory:"
-        run: ./vendor/bin/pest --testsuite checkout --parallel
+        # Serial for now: two suites share helpers and fake gateways declared
+        # inside a sibling test file, which only resolve in one process.
+        run: ./vendor/bin/pest --testsuite checkout
 
   static-analysis:
     runs-on: ubuntu-latest

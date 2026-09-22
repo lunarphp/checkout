@@ -10,9 +10,9 @@ use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Currency;
 use Lunar\Core\Models\Customer;
 use Lunar\Core\Models\TaxClass;
+use Lunar\Tests\Checkout\Stubs\User;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
-use Lunar\Tests\Checkout\Stubs\User;
 
 uses(TestCase::class, RefreshDatabase::class);
 

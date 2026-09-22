@@ -71,7 +71,7 @@ class CheckoutServiceProvider extends ServiceProvider
         // Element registry — a single build-time instance consumers register
         // elements onto (via the Checkout facade). The container is the swap
         // seam; rebind the contract to substitute the implementation.
-        $this->app->singleton(ElementRegistryContract::class, fn ($app) => new ElementRegistry($app));
+        $this->app->singleton(ElementRegistryContract::class, ElementRegistry::class);
 
         // Contributed-asset registry (spec 0009). Build-time + Octane-safe like
         // the element registry: packages call CheckoutAssets::register() in their
@@ -82,7 +82,7 @@ class CheckoutServiceProvider extends ServiceProvider
         // Payment-method registry (spec 0002 §B). Core ships no methods —
         // gateway packages or the host app register them in boot(); with none
         // registered the payment region projects empty.
-        $this->app->singleton(PaymentMethodRegistryContract::class, fn ($app) => new PaymentMethodRegistry($app));
+        $this->app->singleton(PaymentMethodRegistryContract::class, PaymentMethodRegistry::class);
 
         // Element data store. This session-backed binding serves the embedded
         // flow; the uuid checkout flow swaps in a row-backed store per request.

@@ -316,6 +316,36 @@ npm run dev        # Vite dev server, for working on the app's own components
 
 `dist/` is what install-and-go consumers run; rebuild it on every UI change.
 
+### PHP side
+
+```bash
+composer install
+composer test          # pest + phpstan
+vendor/bin/pint        # code style
+```
+
+While Lunar v2 is in alpha, `lunarphp/core` on Packagist can lag behind the
+contracts this package builds against. To test against a local monorepo
+checkout, point Composer at it (not committed, both paths are local to you):
+
+```bash
+composer config repositories.lunar '{"type":"path","url":"../lunar/packages/core","options":{"symlink":true}}'
+composer require "lunarphp/core:2.x-dev" -W
+```
+
+Revert with `git checkout -- composer.json && composer update lunarphp/core`.
+
+### Known follow-ups
+
+- The suite runs serially in CI. Two files reach for helpers and fake gateway
+  classes declared inside a sibling test file (`routeTestCart()` in
+  `CheckoutRouteTest`, `registerFakeHoldGateway()` / `FakeHoldGateway` in
+  `PaymentHoldTest`), which only resolve when both land in one process. Move
+  them into `tests/Pest.php` and `tests/Utils/` to restore `--parallel`.
+- The Stripe element components (`resources/js/components/payments/`) ship in
+  this package. Deliberate: it supports Stripe first, and the
+  `registerCheckoutElement` seam lets a consumer swap them.
+
 ---
 
 ## Key files

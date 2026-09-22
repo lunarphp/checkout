@@ -45,7 +45,7 @@ it('projects no notice when the host binds none', function () {
  * checkout app is a built Inertia bundle with no JS test runner behind it.
  */
 it('blocks and explains the CTA on both pages when nothing delivers', function () {
-    $js = dirname(__DIR__, 3).'/packages/checkout/resources/js';
+    $js = dirname(__DIR__, 2).'/resources/js';
 
     $store = file_get_contents($js.'/composables/useCheckout.js');
     $page = file_get_contents($js.'/components/LunarCheckout.vue');
@@ -68,11 +68,11 @@ it('blocks and explains the CTA on both pages when nothing delivers', function (
  * pressed. The toast rides the bar that produced it.
  */
 it('shows pay refusals against the sticky pay bars', function () {
-    $js = dirname(__DIR__, 3).'/packages/checkout/resources/js';
+    $js = dirname(__DIR__, 2).'/resources/js';
 
     $page = file_get_contents($js.'/components/LunarCheckout.vue');
     $express = file_get_contents($js.'/pages/ExpressConfirm.vue');
-    $css = dirname(__DIR__, 3).'/packages/checkout/resources/css/checkout.css';
+    $css = dirname(__DIR__, 2).'/resources/css/checkout.css';
 
     expect(file_exists($js.'/components/PayErrorToast.vue'))->toBeTrue()
         ->and($page)->toContain('<PayErrorToast :message="state.payError" @dismiss="state.payError = \'\'" />')
@@ -88,7 +88,7 @@ it('shows pay refusals against the sticky pay bars', function () {
  * Auto-applying the first would charge for delivery the basket had earned.
  */
 it('auto-applies the cheapest delivery option, not the first listed', function () {
-    $source = file_get_contents(dirname(__DIR__, 3).'/packages/checkout/resources/js/components/ShippingMethods.vue');
+    $source = file_get_contents(dirname(__DIR__, 2).'/resources/js/components/ShippingMethods.vue');
 
     expect($source)->toContain('const cheapestDelivery = computed(')
         ->and($source)->toContain('selectShipping(cheapestDelivery.value.id)')
