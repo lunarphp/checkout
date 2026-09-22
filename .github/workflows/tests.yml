@@ -1,0 +1,101 @@
+name: Tests
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+  push:
+    branches: [main]
+  schedule:
+    # Daily sweep to catch drift in lunarphp/core while v2 is in alpha.
+    - cron: "0 6 * * *"
+
+concurrency:
+  group: tests-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # PRs run a slimmed matrix; push and the schedule run the full one.
+        php: ${{ fromJSON(github.event_name == 'pull_request' && '["8.4"]' || '["8.4","8.5"]') }}
+        laravel: ["12.*", "13.*"]
+        include:
+          - laravel: 12.*
+            testbench: 10.*
+          - laravel: 13.*
+            testbench: 11.*
+    name: checkout - PHP ${{ matrix.php }} - L${{ matrix.laravel }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, pdo, pdo_sqlite
+          tools: composer:v2
+          coverage: none
+
+      - name: Pin Laravel + Testbench versions
+        run: |
+          composer require "laravel/framework:${{ matrix.laravel }}" --no-update --no-interaction
+          composer require "orchestra/testbench:${{ matrix.testbench }}" --dev --no-update --no-interaction
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@v4
+        with:
+          composer-options: "--prefer-dist"
+          custom-cache-key: composer-p${{ matrix.php }}-l${{ matrix.laravel }}-${{ hashFiles('composer.json') }}
+
+      - name: Execute tests
+        env:
+          APP_ENV: testing
+          DB_CONNECTION: testing
+          DB_DATABASE: ":memory:"
+        run: ./vendor/bin/pest --testsuite checkout --parallel
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    name: phpstan
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer:v2
+          coverage: none
+      - uses: ramsey/composer-install@v4
+        with:
+          composer-options: "--prefer-dist"
+      - run: ./vendor/bin/phpstan analyse --no-progress
+
+  code-style:
+    runs-on: ubuntu-latest
+    name: pint
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer:v2
+          coverage: none
+      - uses: ramsey/composer-install@v4
+        with:
+          composer-options: "--prefer-dist"
+      - run: ./vendor/bin/pint --test
+
+  build:
+    runs-on: ubuntu-latest
+    name: vite build
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm run build

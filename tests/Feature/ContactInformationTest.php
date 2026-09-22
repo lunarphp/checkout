@@ -10,7 +10,7 @@ use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Models\Customer;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
-use Lunar\Tests\Core\Stubs\User;
+use Lunar\Tests\Checkout\Stubs\User;
 
 uses(TestCase::class, RefreshDatabase::class);
 

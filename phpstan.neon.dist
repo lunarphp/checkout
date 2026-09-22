@@ -1,0 +1,10 @@
+includes:
+    - ./vendor/larastan/larastan/extension.neon
+parameters:
+    level: 0
+    paths:
+        - src
+    excludePaths:
+        - config/*
+        - vendor/*
+    checkOctaneCompatibility: true
