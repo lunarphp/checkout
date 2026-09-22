@@ -175,4 +175,22 @@ return [
         'distance_unit' => null,
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Stripe
+    |--------------------------------------------------------------------------
+    |
+    | Settings for the Stripe payment methods this package ships. Stripe
+    | refuses charges below a per-currency minimum, and the card method
+    | withdraws itself for baskets under that figure rather than let the
+    | customer meet a gateway error at Pay. Override or add a currency here,
+    | in minor units, e.g. ['GBP' => 30]; StripeCardMethod::MINIMUM_AMOUNTS
+    | carries the published defaults.
+    |
+    */
+
+    'stripe' => [
+        'minimum_amounts' => [],
+    ],
+
 ];
