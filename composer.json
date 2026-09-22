@@ -1,72 +1,85 @@
 {
-  "name": "lunarphp/checkout",
-  "type": "library",
-  "description": "Composable, provider-agnostic checkout building blocks for Lunar.",
-  "keywords": ["lunarphp", "laravel", "ecommerce", "e-commerce", "headless", "store", "shop", "cart", "checkout"],
-  "license": "MIT",
-  "homepage": "https://lunarphp.io/",
-  "support": {
-    "issues": "https://github.com/lunarphp/checkout/issues",
-    "source": "https://github.com/lunarphp/checkout"
-  },
-  "authors": [
-    {
-      "name": "Lunar",
-      "homepage": "https://lunarphp.io/"
-    }
-  ],
-  "require": {
-    "php": "^8.4",
-    "lunarphp/core": "^2.0@dev",
-    "inertiajs/inertia-laravel": "^2.0|^3.0",
-    "spatie/laravel-data": "^4.23"
-  },
-  "require-dev": {
-    "larastan/larastan": "^3.0",
-    "laravel/pint": "1.29.0",
-    "mockery/mockery": "^1.6.9",
-    "orchestra/testbench": "^10.0|^11.0",
-    "pestphp/pest": "^3.0|^4.0",
-    "pestphp/pest-plugin-laravel": "^3.0|^4.0",
-    "phpstan/phpstan": "^2.1.17"
-  },
-  "autoload": {
-    "psr-4": {
-      "Lunar\\Checkout\\": "src/",
-      "Lunar\\Checkout\\Database\\Factories\\": "database/factories/"
-    }
-  },
-  "autoload-dev": {
-    "psr-4": {
-      "Lunar\\Tests\\Checkout\\": "tests/"
-    }
-  },
-  "scripts": {
-    "pint": "pint",
-    "test:pest": "pest",
-    "test:phpstan": "phpstan analyse",
-    "test": [
-      "@test:pest",
-      "@test:phpstan"
-    ]
-  },
-  "extra": {
-    "lunar": {
-      "name": "Checkout"
+    "name": "lunarphp/checkout",
+    "description": "Composable, provider-agnostic checkout building blocks for Lunar.",
+    "keywords": [
+        "lunarphp",
+        "laravel",
+        "ecommerce",
+        "e-commerce",
+        "headless",
+        "store",
+        "shop",
+        "cart",
+        "checkout"
+    ],
+    "homepage": "https://lunarphp.io/",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Lunar",
+            "homepage": "https://lunarphp.io/"
+        }
+    ],
+    "require": {
+        "php": "^8.4",
+        "lunarphp/core": "^2.0@dev",
+        "inertiajs/inertia-laravel": "^2.0|^3.0",
+        "spatie/laravel-data": "^4.23"
     },
-    "laravel": {
-      "providers": [
-        "Lunar\\Checkout\\CheckoutServiceProvider"
-      ]
+    "require-dev": {
+        "larastan/larastan": "^3.0",
+        "laravel/pint": "1.29.0",
+        "mockery/mockery": "^1.6.9",
+        "orchestra/testbench": "^10.0|^11.0",
+        "pestphp/pest": "^3.0|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0",
+        "phpstan/phpstan": "^2.1.17"
+    },
+    "suggest": {
+        "lunarphp/table-rate-shipping": "Derive the checkout delivery countries from your shipping zones instead of a configured list."
+    },
+    "autoload": {
+        "psr-4": {
+            "Lunar\\Checkout\\": "src/",
+            "Lunar\\Checkout\\Database\\Factories\\": "database/factories/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Lunar\\Tests\\Checkout\\": "tests/"
+        }
+    },
+    "scripts": {
+        "pint": "pint",
+        "test:pest": "pest",
+        "test:phpstan": "phpstan analyse",
+        "test": [
+            "@test:pest",
+            "@test:phpstan"
+        ]
+    },
+    "extra": {
+        "lunar": {
+            "name": "Checkout"
+        },
+        "laravel": {
+            "providers": [
+                "Lunar\\Checkout\\CheckoutServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "type": "library",
+    "support": {
+        "issues": "https://github.com/lunarphp/checkout/issues",
+        "source": "https://github.com/lunarphp/checkout"
     }
-  },
-  "minimum-stability": "dev",
-  "prefer-stable": true,
-  "config": {
-    "sort-packages": true,
-    "allow-plugins": {
-      "pestphp/pest-plugin": true,
-      "php-http/discovery": true
-    }
-  }
 }

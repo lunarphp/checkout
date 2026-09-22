@@ -26,6 +26,7 @@ use Lunar\Checkout\Contracts\ElementRegistry as ElementRegistryContract;
 use Lunar\Checkout\Contracts\PaymentMethodRegistry as PaymentMethodRegistryContract;
 use Lunar\Checkout\DataObjects\CheckoutTheme;
 use Lunar\Checkout\DeliveryCountries\ConfiguredCountries;
+use Lunar\Checkout\DeliveryCountries\ShippingZoneCountries;
 use Lunar\Checkout\Exceptions\CheckoutSessionConflictException;
 use Lunar\Checkout\Exceptions\CheckoutSessionNotOperableException;
 use Lunar\Checkout\Listeners\CompleteSessionOnPaymentSuccess;
@@ -39,6 +40,7 @@ use Lunar\Checkout\Validation\Cart\PickupPointRequired;
 use Lunar\Core\Events\PaymentAttemptEvent;
 use Lunar\Core\Modifiers\ShippingModifiers;
 use Lunar\Core\Validation\Cart\ValidateCartForOrderCreation;
+use Lunar\Shipping\Models\ShippingZone;
 
 class CheckoutServiceProvider extends ServiceProvider
 {
@@ -108,9 +110,14 @@ class CheckoutServiceProvider extends ServiceProvider
 
         // Address lookup (spec 0011 §B): same Manager shape as the checkout
         // driver. Selected by config value; hosts extend() their own.
-        // Delivery countries (spec 0011 §H). Bound, not a singleton, so a
-        // shipping package's boot-time rebind replaces it cleanly.
-        $this->app->bind(DeliveryCountries::class, ConfiguredCountries::class);
+        // Delivery countries (spec 0011 section H). Derived from the shipping
+        // zones when table-rate shipping is installed, otherwise from config.
+        // The choice is made here because nothing in the Lunar monorepo may
+        // depend on this package, so the shipping side cannot rebind it.
+        $this->app->bind(
+            DeliveryCountries::class,
+            class_exists(ShippingZone::class) ? ShippingZoneCountries::class : ConfiguredCountries::class,
+        );
 
         $this->app->singleton(AddressLookupManager::class);
         $this->app->bind(

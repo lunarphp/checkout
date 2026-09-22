@@ -4,6 +4,7 @@ namespace Lunar\Checkout\Contracts;
 
 use Illuminate\Support\Collection;
 use Lunar\Checkout\DeliveryCountries\ConfiguredCountries;
+use Lunar\Checkout\DeliveryCountries\ShippingZoneCountries;
 use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Country;
 
@@ -13,9 +14,12 @@ use Lunar\Core\Models\Country;
  * refuses anything outside it, so a customer never saves an address the
  * store cannot ship to and then finds no delivery options.
  *
- * The package binds {@see ConfiguredCountries}
- * by default; a shipping package that knows its zones rebinds this to derive
- * the list from them.
+ * The package binds {@see ShippingZoneCountries} when
+ * lunarphp/table-rate-shipping is installed and {@see ConfiguredCountries}
+ * otherwise. Both bindings are made here: no package in the Lunar monorepo
+ * may depend on this one, so a shipping package cannot rebind it itself.
+ * A host with its own country source binds this interface in its own
+ * service provider.
  */
 interface DeliveryCountries
 {
