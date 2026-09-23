@@ -9,7 +9,9 @@ use Lunar\Core\Contracts\CreatesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
 use Lunar\Core\DataObjects\HoldDescription;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\Enums\HoldAdjustment;
+use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
@@ -47,6 +49,20 @@ class FakeExpressHoldGateway extends OfflinePayment implements CreatesPaymentInt
     }
 
     public function captureHold(string $reference, int $amountMinor): void {}
+
+    // SupportsPaymentHolds extends SupportsPaymentIntents, so the release and
+    // reconciliation verbs come with it.
+    public function fetchIntent(string $reference): PaymentIntentStatus
+    {
+        return PaymentIntentStatus::RequiresCapture;
+    }
+
+    public function voidIntent(string $reference): void {}
+
+    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    {
+        return new PaymentRefund(success: true, reference: 'refund_express_'.$reference);
+    }
 }
 
 class FakeExpressMethod extends AbstractPaymentMethod

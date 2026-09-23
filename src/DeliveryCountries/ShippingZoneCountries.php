@@ -15,18 +15,32 @@ use Lunar\Shipping\Models\ShippingZone;
  * countries; an unrestricted zone with a live rate means everywhere.
  *
  * Bound over {@see ConfiguredCountries} only when lunarphp/table-rate-shipping
- * is installed, so the checkout stays usable without it. The binding lives
- * here rather than in the shipping package because nothing in the Lunar
- * monorepo may depend on this one.
+ * is installed and no delivery countries are configured explicitly, so the
+ * checkout stays usable without it. The binding lives here rather than in the
+ * shipping package because nothing in the Lunar monorepo may depend on this
+ * one.
+ *
+ * A store with no zones carrying a live rate has not set shipping up yet, as
+ * opposed to having decided it ships nowhere, so the configured list answers
+ * instead. Without that, installing the shipping package and not yet
+ * configuring it would refuse every delivery address.
  */
 class ShippingZoneCountries implements DeliveryCountries
 {
+    public function __construct(
+        private ConfiguredCountries $configured,
+    ) {}
+
     public function available(Cart $cart): Collection
     {
         $zones = ShippingZone::query()
             ->whereHas('rates.shippingMethod', fn ($query) => $query->where('enabled', true))
             ->with('countries', 'states.country')
             ->get();
+
+        if ($zones->isEmpty()) {
+            return $this->configured->available($cart);
+        }
 
         if ($zones->contains(fn (ShippingZone $zone): bool => $zone->type === 'unrestricted')) {
             return Country::query()->orderBy('name')->get();

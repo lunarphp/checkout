@@ -20,10 +20,17 @@
             "homepage": "https://lunarphp.io/"
         }
     ],
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/lunarphp/lunar"
+        }
+    ],
     "require": {
         "php": "^8.4",
-        "lunarphp/core": "^2.0@dev",
         "inertiajs/inertia-laravel": "^2.0|^3.0",
+        "lunarphp/core": "^2.0@dev",
+        "lunarphp/lunarmono": "dev-checkout-deps as 2.x-dev",
         "spatie/laravel-data": "^4.23"
     },
     "require-dev": {

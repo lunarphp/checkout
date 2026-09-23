@@ -5,7 +5,9 @@ use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\SupportsPaymentIntents;
+use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
@@ -27,7 +29,7 @@ class ReleaseTestGateway extends OfflinePayment implements SupportsPaymentIntent
     public function fetchIntent(string $reference): PaymentIntentStatus
     {
         if (static::$throwOnFetch) {
-            throw new RuntimeException('gateway unreachable');
+            throw new PaymentIntentException('gateway unreachable');
         }
 
         return static::$status;
@@ -35,9 +37,9 @@ class ReleaseTestGateway extends OfflinePayment implements SupportsPaymentIntent
 
     public function voidIntent(string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): string
+    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
     {
-        return 're_test';
+        return new PaymentRefund(success: true, reference: 're_test');
     }
 }
 

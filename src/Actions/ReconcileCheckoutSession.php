@@ -17,6 +17,7 @@ use Lunar\Checkout\Support\PaymentIntentGateway;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
 use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Exceptions\PaymentIntentException;
 
 /**
  * Bounded resolution of a `PaymentProcessing` session (spec 0010 §F): the
@@ -53,7 +54,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
         try {
             $status = $gateway->fetchIntent($reference);
-        } catch (\Throwable) {
+        } catch (PaymentIntentException) {
             return $this->recordAttempt($session);
         }
 
@@ -89,7 +90,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
             try {
                 $status = $gateway->fetchIntent($reference);
-            } catch (\Throwable) {
+            } catch (PaymentIntentException) {
                 return 'unconfirmed';
             }
 
@@ -140,7 +141,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             try {
                 $gateway->captureHold($reference, (int) $session->amount_total);
                 $holdCaptured = true;
-            } catch (\Throwable $e) {
+            } catch (PaymentIntentException $e) {
                 report($e);
 
                 // Nothing was captured: the intent reference survives so the
@@ -169,7 +170,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         if ($session->isHoldMode() && ! $holdCaptured) {
             try {
                 $gateway->voidIntent($reference);
-            } catch (\Throwable) {
+            } catch (PaymentIntentException) {
                 $this->events->dispatch(new CheckoutCompletionFailed($session, 'void-failed'));
 
                 return $this->recordAttempt($session);
@@ -182,19 +183,19 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         }
 
         try {
-            $refundReference = $gateway->refundIntent(
+            $refund = $gateway->refundIntent(
                 $reference,
                 $session->amount_total,
                 'lunar-checkout-refund:'.$reference,
             );
-        } catch (\Throwable) {
+        } catch (PaymentIntentException) {
             $this->events->dispatch(new CheckoutCompletionFailed($session, 'refund-failed'));
 
             return $this->recordAttempt($session);
         }
 
         $this->reopen($session, 'refunded');
-        $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refundReference));
+        $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refund->reference));
 
         return 'refunded';
     }
@@ -231,14 +232,14 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         SupportsPaymentIntents $gateway,
         string $reference,
     ): string {
-        $refundReference = $gateway->refundIntent(
+        $refund = $gateway->refundIntent(
             $reference,
             $session->amount_total,
             'lunar-checkout-refund:'.$reference,
         );
 
         $this->reopen($session, 'refunded');
-        $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refundReference));
+        $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refund->reference));
 
         return 'refunded';
     }

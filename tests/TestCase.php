@@ -8,6 +8,7 @@ use Inertia\ServiceProvider as InertiaServiceProvider;
 use Lunar\Checkout\CheckoutServiceProvider;
 use Lunar\Core\LunarServiceProvider;
 use Lunar\Nestedset\NestedSetServiceProvider;
+use Lunar\Shipping\ShippingServiceProvider;
 use Orchestra\Testbench\TestCase as BaseTestCase;
 use Spatie\Activitylog\ActivitylogServiceProvider;
 use Spatie\LaravelBlink\BlinkServiceProvider;
@@ -38,6 +39,10 @@ class TestCase extends BaseTestCase
             PermissionServiceProvider::class,
             ActivitylogServiceProvider::class,
             NestedSetServiceProvider::class,
+            // Installed alongside core: the delivery step derives its
+            // countries from the shipping zones when it is present, so the
+            // test environment needs its schema.
+            ShippingServiceProvider::class,
             // Projected DTOs (addresses, snapshots) are spatie/laravel-data
             // objects; Inertia's prop resolver reads this provider's config
             // when it serializes them.

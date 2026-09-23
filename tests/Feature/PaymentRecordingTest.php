@@ -12,6 +12,7 @@ use Lunar\Core\Contracts\CreatesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\DataObjects\PaymentAuthorize;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
@@ -49,9 +50,9 @@ class RecordingGateway extends OfflinePayment implements CreatesPaymentIntents, 
 
     public function voidIntent(string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): string
+    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
     {
-        return 'refund_'.$reference;
+        return new PaymentRefund(success: true, reference: 'refund_'.$reference);
     }
 
     public function authorize(): ?PaymentAuthorize

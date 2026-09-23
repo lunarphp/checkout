@@ -110,14 +110,24 @@ class CheckoutServiceProvider extends ServiceProvider
 
         // Address lookup (spec 0011 §B): same Manager shape as the checkout
         // driver. Selected by config value; hosts extend() their own.
-        // Delivery countries (spec 0011 section H). Derived from the shipping
-        // zones when table-rate shipping is installed, otherwise from config.
-        // The choice is made here because nothing in the Lunar monorepo may
-        // depend on this package, so the shipping side cannot rebind it.
-        $this->app->bind(
-            DeliveryCountries::class,
-            class_exists(ShippingZone::class) ? ShippingZoneCountries::class : ConfiguredCountries::class,
-        );
+        /*
+         * Delivery countries (spec 0011 section H). An explicit
+         * `delivery_countries` list always wins: a store that named its
+         * countries means them. With no list configured, and table-rate
+         * shipping installed, the zones are the better answer than "every
+         * country Lunar knows". Resolved per call, not at boot, so a host (or
+         * a test) that sets the config later still gets the list it asked for.
+         *
+         * The choice is made here rather than in the shipping package because
+         * nothing in the Lunar monorepo may depend on this one.
+         */
+        $this->app->bind(DeliveryCountries::class, function ($app) {
+            $configured = config('lunar.checkout.delivery_countries');
+
+            return $configured === null && class_exists(ShippingZone::class)
+                ? $app->make(ShippingZoneCountries::class)
+                : $app->make(ConfiguredCountries::class);
+        });
 
         $this->app->singleton(AddressLookupManager::class);
         $this->app->bind(

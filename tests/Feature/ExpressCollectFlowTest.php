@@ -12,6 +12,7 @@ use Lunar\Core\Contracts\SupportsPaymentHolds;
 use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\DataObjects\HoldDescription;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\Enums\HoldAdjustment;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
@@ -65,9 +66,9 @@ class CollectExpressGateway extends OfflinePayment implements CreatesPaymentInte
 
     public function voidIntent(string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): string
+    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
     {
-        return 'refund_'.$reference;
+        return new PaymentRefund(success: true, reference: 'refund_'.$reference);
     }
 }
 

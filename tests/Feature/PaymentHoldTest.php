@@ -14,8 +14,10 @@ use Lunar\Core\Contracts\SupportsPaymentHolds;
 use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\DataObjects\HoldDescription;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\Enums\HoldAdjustment;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
@@ -93,7 +95,7 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
     public function captureHold(string $reference, int $amountMinor): void
     {
         if (static::$throwOnCapture) {
-            throw new RuntimeException('fake gateway capture failed');
+            throw new PaymentIntentException('fake gateway capture failed');
         }
 
         static::$captureCalls[] = ['reference' => $reference, 'amount' => $amountMinor];
@@ -107,17 +109,17 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
     public function voidIntent(string $reference): void
     {
         if (static::$throwOnVoid) {
-            throw new RuntimeException('fake gateway void failed');
+            throw new PaymentIntentException('fake gateway void failed');
         }
 
         static::$voidedReferences[] = $reference;
     }
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): string
+    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
     {
         static::$refundCalls[] = ['reference' => $reference, 'amount' => $amountMinor];
 
-        return 'refund_fake_'.$reference;
+        return new PaymentRefund(success: true, reference: 'refund_fake_'.$reference);
     }
 }
 
@@ -155,11 +157,11 @@ class IntentOnlyGateway extends OfflinePayment implements CreatesPaymentIntents,
         static::$voidedReferences[] = $reference;
     }
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): string
+    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
     {
         static::$refundCalls[] = ['reference' => $reference, 'amount' => $amountMinor];
 
-        return 'refund_intent_only_'.$reference;
+        return new PaymentRefund(success: true, reference: 'refund_intent_only_'.$reference);
     }
 }
 
