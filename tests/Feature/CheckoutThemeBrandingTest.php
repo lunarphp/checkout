@@ -13,7 +13,7 @@ uses(TestCase::class, RefreshDatabase::class);
  */
 it('renders the theme favicon and the merchant name in the root view head', function () {
     app()->bind(CheckoutTheme::class, fn (): CheckoutTheme => CheckoutTheme::tender()->with(favicon: '/favicon.svg'));
-    config()->set('checkout.merchant', 'Edwardes Bros');
+    config()->set('lunar.checkout.merchant', 'Edwardes Bros');
 
     $cart = CheckoutCart::orderable();
     $session = CheckoutCart::session($cart);

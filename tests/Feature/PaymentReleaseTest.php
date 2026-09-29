@@ -221,6 +221,17 @@ it('processing renders the polling page while the outcome is in flight', functio
     expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class);
 });
 
+it('processing shows the same merchant name as the checkout', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::Pending;
+    config(['lunar.checkout.merchant' => 'Edwardes Bros', 'app.name' => 'Lunar Store']);
+
+    $session = pinnedSession();
+
+    $this->get(route('lunar.checkout.processing', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertOk()
+        ->assertJsonPath('props.merchant', 'Edwardes Bros');
+});
+
 it('processing redirects an already completed session straight to success', function () {
     $session = pinnedSession();
     $session->forceFill(['status' => Completed::$name, 'success_url' => 'https://store.test/thanks'])->save();

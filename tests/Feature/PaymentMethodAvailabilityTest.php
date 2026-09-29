@@ -193,6 +193,23 @@ it('collects the reasons unavailable methods give', function () {
     expect($registry->unavailableReasons($large))->toBe([]);
 });
 
+it('renders the checkout before any payment method is registered', function () {
+    $cart = CheckoutCart::orderable();
+    $session = CheckoutCart::session($cart);
+
+    $this->get(route('lunar.checkout.show', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertOk()
+        ->assertJsonCount(0, 'props.checkout.paymentMethods')
+        ->assertJsonPath('props.checkout.paymentUnavailable', []);
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'fingerprint' => CheckoutCart::fingerprint($session),
+        'payment_method' => 'offline',
+    ])->assertStatus(422);
+
+    expect(Order::query()->count())->toBe(0);
+});
+
 it('projects why the payment region is empty', function () {
     app(PaymentMethodRegistry::class)->add(MinimumSpendMethod::class);
 
