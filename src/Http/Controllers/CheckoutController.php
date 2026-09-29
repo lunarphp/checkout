@@ -386,7 +386,7 @@ class CheckoutController extends Controller
 
         return [
             'uuid' => $session->uuid,
-            'merchant' => config('checkout.merchant') ?: config('app.name'),
+            'merchant' => $this->merchant(),
             'currency' => $snapshot->currencyCode,
             'items' => array_map(fn (array $line): array => [
                 'id' => $line['identifier'],
@@ -449,6 +449,15 @@ class CheckoutController extends Controller
             'paymentUnavailable' => array_values(app(PaymentMethodRegistry::class)->unavailableReasons($cart)),
             'urls' => $this->sessionUrls($session),
         ];
+    }
+
+    /**
+     * The store name in the checkout header: the configured merchant, falling
+     * back to the application name. The root view's tab title reads the same.
+     */
+    private function merchant(): string
+    {
+        return (string) (config('lunar.checkout.merchant') ?: config('app.name'));
     }
 
     /**
@@ -1243,7 +1252,7 @@ class CheckoutController extends Controller
 
         return Inertia::render('Processing', [
             'pollUrl' => route('lunar.checkout.processing', $session->uuid),
-            'merchant' => config('app.name', 'Store'),
+            'merchant' => $this->merchant(),
             'theme' => $theme->tokens(),
             'branding' => $theme->branding(),
             'stylesheet' => $theme->stylesheet(),

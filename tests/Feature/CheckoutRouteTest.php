@@ -98,7 +98,7 @@ it('forbids viewing a session the requester does not own', function () {
 });
 
 it('projects the configured merchant name into the header prop', function () {
-    config(['checkout.merchant' => 'Edwardes Bros']);
+    config(['lunar.checkout.merchant' => 'Edwardes Bros']);
 
     // Needs lines: show() bounces a session whose cart is empty.
     $cart = CheckoutCart::orderable();
@@ -114,7 +114,7 @@ it('projects the configured merchant name into the header prop', function () {
 });
 
 it('falls back to the app name when no merchant is configured', function () {
-    config(['checkout.merchant' => null, 'app.name' => 'Lunar Store']);
+    config(['lunar.checkout.merchant' => null, 'app.name' => 'Lunar Store']);
 
     // Needs lines: show() bounces a session whose cart is empty.
     $cart = CheckoutCart::orderable();

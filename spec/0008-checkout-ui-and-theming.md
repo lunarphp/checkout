@@ -201,7 +201,7 @@ from the current channel. Same seam, runtime-resolved.
 **Favicon and tab title (added in run 1 of the master test plan).** `CheckoutTheme::favicon`
 is a URL/path validated by the same chokepoint as `logo` and `stylesheet`, projected as
 `favicon` and rendered by the root view as `<link rel="icon">`. The tab title is
-"Checkout · {merchant}" from `checkout.merchant`, falling back to the app name. Without
+"Checkout · {merchant}" from `lunar.checkout.merchant`, falling back to the app name. Without
 either, the checkout's own document showed the browser's blank globe and a bare "Checkout".
 
 ### E. Three customisation tiers (light → heavy)
