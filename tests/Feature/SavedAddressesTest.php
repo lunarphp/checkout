@@ -189,3 +189,36 @@ it('never projects another customer\'s address book', function () {
         ->assertOk()
         ->assertJsonPath('props.checkout.savedAddresses', []);
 });
+
+it('marks the billing default so the payment step can prefill it', function () {
+    [$user, $customer] = savedAddressUser();
+    $country = Country::factory()->create(['iso2' => 'GB']);
+
+    Address::factory()->create([
+        'customer_id' => $customer->id,
+        'country_id' => $country->id,
+        'line_one' => '1 Depot Road',
+        'postcode' => 'DA1 1AA',
+        'shipping_default' => true,
+        'billing_default' => false,
+    ]);
+    Address::factory()->create([
+        'customer_id' => $customer->id,
+        'country_id' => $country->id,
+        'line_one' => '9 Registered Office',
+        'postcode' => 'SE1 1AA',
+        'shipping_default' => false,
+        'billing_default' => true,
+    ]);
+
+    $cart = CheckoutCart::addLine(routeTestCart());
+    $session = app(CheckoutDriver::class)->createSession($cart);
+    CartSession::use($cart);
+    $this->actingAs($user);
+
+    $this->get(route('lunar.checkout.show', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertOk()
+        ->assertJsonPath('props.checkout.savedAddresses.0.billingDefault', false)
+        ->assertJsonPath('props.checkout.savedAddresses.1.address.line1', '9 Registered Office')
+        ->assertJsonPath('props.checkout.savedAddresses.1.billingDefault', true);
+});

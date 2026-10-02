@@ -710,7 +710,7 @@ class CheckoutController extends Controller
      * customer domain rather than cart domain, which is why this lives here
      * beside ensureOwnership() instead of on the CheckoutDriver.
      *
-     * @return array<int, array{id: string, title: string|null, shippingDefault: bool, address: CheckoutAddress}>
+     * @return array<int, array{id: string, title: string|null, shippingDefault: bool, billingDefault: bool, address: CheckoutAddress}>
      */
     private function projectSavedAddresses(): array
     {
@@ -731,6 +731,9 @@ class CheckoutController extends Controller
                 'id' => $address->public_id,
                 'title' => $address->title,
                 'shippingDefault' => (bool) $address->shipping_default,
+                // The payment step prefills a billing default that is not the
+                // delivery address (the box starts unticked).
+                'billingDefault' => (bool) $address->billing_default,
                 'address' => new CheckoutAddress(
                     countryCode: $address->country?->iso2 ?? 'GB',
                     firstName: $address->first_name,

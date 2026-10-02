@@ -1,4 +1,4 @@
-import { computed, inject, provide, reactive } from 'vue'
+import { computed, inject, provide, reactive, watch } from 'vue'
 import { router } from '@inertiajs/vue3'
 import { money } from '../utils/money.js'
 
@@ -50,6 +50,11 @@ export async function postJson(url, body, fallbackMessage = 'The request could n
 
 // Line 1 + postcode is identity enough, the same test the address book uses.
 // Missing either side reads as "not different": nothing to compare yet.
+/** The saved address flagged as the customer's billing default, or null. */
+export function defaultBillingEntry(savedAddresses) {
+  return (savedAddresses ?? []).find((entry) => entry.billingDefault) ?? null
+}
+
 export function addressesDiffer(a, b) {
   if (!a || !b) return false
   return a.line1 !== b.line1 || a.postcode !== b.postcode
@@ -113,7 +118,14 @@ export function createCheckout(data) {
     fingerprint: data.fingerprint ?? null,
     // A reload with a distinct billing address on the cart resumes unticked,
     // so the customer sees the address they captured rather than losing it.
-    billingSame: !addressesDiffer(data.billingAddress, data.shippingAddress),
+    // With none yet, a saved billing default that is not the delivery
+    // address starts the box unticked so that address is used instead.
+    billingSame: data.billingAddress
+      ? !addressesDiffer(data.billingAddress, data.shippingAddress)
+      : !addressesDiffer(defaultBillingEntry(data.savedAddresses)?.address, data.shippingAddress),
+    // Set once the customer ticks or unticks the box themselves; from then
+    // on a changed delivery address no longer moves it for them.
+    billingTouched: false,
     payError: '',
     discount: null, // { code, type, value, label }
     discountError: '',
@@ -332,6 +344,21 @@ export function createCheckout(data) {
   // True once the customer has captured a billing address that is not just
   // the delivery address copied across.
   const billingDiffers = computed(() => addressesDiffer(state.billingAddress, state.shippingAddress))
+
+  // The customer's saved default billing address, if they have one.
+  const defaultBilling = computed(() => defaultBillingEntry(state.savedAddresses))
+
+  // The delivery address is often chosen after the page loads, so the
+  // default-billing decision is re-made when it changes, until the customer
+  // has made the choice themselves or captured a billing address of their own.
+  watch(
+    () => [state.shippingAddress?.line1, state.shippingAddress?.postcode],
+    () => {
+      if (state.billingTouched || billingDiffers.value) return
+
+      state.billingSame = !addressesDiffer(defaultBilling.value?.address, state.shippingAddress)
+    },
+  )
 
   // Select a shipping option. Optimistic highlight, server-confirmed — the
   // reload brings back the cart's stored selection and recalculated totals.
@@ -643,6 +670,7 @@ export function createCheckout(data) {
     storeShippingAddress,
     storeBillingAddress,
     billingDiffers,
+    defaultBilling,
     selectShipping,
     setFulfilment,
     activePaymentMethod,

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import Icon from './primitives/Icon.vue'
 import AddressFields from './AddressFields.vue'
 import { useCheckout } from '../composables/useCheckout.js'
@@ -8,26 +8,31 @@ import { useCheckout } from '../composables/useCheckout.js'
 // delivery address as billing address" is unticked. Same fields and postcode
 // lookup as the delivery step; persistence goes through the billing-address
 // route, and the projection brings the stored address back.
-const { state, storeBillingAddress, billingDiffers } = useCheckout()
+const { state, storeBillingAddress, billingDiffers, defaultBilling } = useCheckout()
 
 // Only a stored billing address that is not the delivery address copied
 // across is the customer's own, so only that one pre-fills and collapses.
 const stored = billingDiffers.value ? state.billingAddress : null
 
+// Without one, a signed-in customer's saved billing default fills in and is
+// stored straight away, the way the delivery step applies a saved address.
+const savedDefault = stored ? null : (defaultBilling.value?.address ?? null)
+const prefill = stored ?? savedDefault
+
 const defaultCountry = state.countries[0]?.code ?? 'GB'
 
 const form = reactive({
-  name: [stored?.firstName, stored?.lastName].filter(Boolean).join(' '),
-  companyName: stored?.companyName ?? '',
-  line1: stored?.line1 ?? '',
-  line2: stored?.line2 ?? '',
-  city: stored?.city ?? '',
-  postcode: stored?.postcode ?? '',
-  country: stored?.countryCode ?? defaultCountry,
-  phone: stored?.phone ?? '',
+  name: [prefill?.firstName, prefill?.lastName].filter(Boolean).join(' '),
+  companyName: prefill?.companyName ?? '',
+  line1: prefill?.line1 ?? '',
+  line2: prefill?.line2 ?? '',
+  city: prefill?.city ?? '',
+  postcode: prefill?.postcode ?? '',
+  country: prefill?.countryCode ?? defaultCountry,
+  phone: prefill?.phone ?? '',
 })
 
-const editing = ref(stored === null)
+const editing = ref(prefill === null)
 const saving = ref(false)
 const errors = ref({})
 
@@ -103,6 +108,36 @@ function save() {
     },
   )
 }
+
+// A saved address is complete, so it posts verbatim (no round trip through
+// the joined name input, which would mis-split multi-word surnames). On a
+// refusal the form opens with the errors.
+onMounted(() => {
+  if (!savedDefault) return
+
+  storeBillingAddress(
+    {
+      first_name: savedDefault.firstName,
+      last_name: savedDefault.lastName,
+      company_name: savedDefault.companyName,
+      line1: savedDefault.line1,
+      line2: savedDefault.line2,
+      city: savedDefault.city,
+      state: savedDefault.state,
+      postcode: savedDefault.postcode,
+      country_code: savedDefault.countryCode,
+      phone: savedDefault.phone,
+    },
+    {
+      onStart: () => (saving.value = true),
+      onError: (err) => {
+        errors.value = err
+        editing.value = true
+      },
+      onFinish: () => (saving.value = false),
+    },
+  )
+})
 </script>
 
 <template>

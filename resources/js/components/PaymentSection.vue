@@ -70,7 +70,7 @@ const panelFor = (method) => resolveElement(method.component)
            and stored on the cart before pay() pins the session. -->
       <template v-if="state.fulfilment !== 'collect'">
         <label class="check" style="margin-top: 14px">
-          <input v-model="state.billingSame" type="checkbox" />
+          <input v-model="state.billingSame" type="checkbox" @change="state.billingTouched = true" />
           <span class="box ico"><Icon name="check" /></span>
           <span class="txt">Use delivery address as billing address</span>
         </label>
