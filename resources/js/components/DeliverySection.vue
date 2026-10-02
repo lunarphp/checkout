@@ -40,6 +40,7 @@ const form = reactive({
   postcode: stored?.postcode ?? '',
   country: stored?.countryCode ?? defaultCountry,
   phone: stored?.phone ?? '',
+  deliveryInstructions: stored?.deliveryInstructions ?? '',
 })
 
 const saving = ref(false)
@@ -58,6 +59,7 @@ const inlineErrorKeys = [
   'postcode',
   'country_code',
   'phone',
+  'delivery_instructions',
 ]
 const otherErrors = computed(() =>
   Object.entries(errors.value)
@@ -120,6 +122,7 @@ function useSaved(entry) {
   form.postcode = address.postcode ?? ''
   form.country = address.countryCode ?? defaultCountry
   form.phone = address.phone ?? ''
+  form.deliveryInstructions = address.deliveryInstructions ?? ''
 
   storeShippingAddress(
     {
@@ -132,6 +135,7 @@ function useSaved(entry) {
       postcode: address.postcode,
       country_code: address.countryCode,
       phone: address.phone || null,
+      delivery_instructions: deliveryInstructions(),
     },
     {
       onStart: () => {
@@ -165,6 +169,54 @@ function startNewAddress() {
   form.postcode = ''
   form.country = defaultCountry
   form.phone = ''
+  form.deliveryInstructions = ''
+}
+
+// --- Delivery instructions ---------------------------------------------------
+//
+// Delivery only: a collection has nobody to instruct, so the box is hidden
+// and nothing is sent. Blank posts nothing, which clears what was stored
+// (Lunar rewrites the address row wholesale).
+const showInstructions = computed(() => !collecting.value)
+
+function deliveryInstructions() {
+  if (!showInstructions.value) return null
+
+  return form.deliveryInstructions.trim() || null
+}
+
+// In the address book the address is already saved, so an edited box is saved
+// on its own by re-posting the chosen card with the new instructions.
+function saveInstructions() {
+  const entry = selectedEntry.value
+  const current = state.shippingAddress?.deliveryInstructions ?? ''
+
+  if (saving.value || !entry || (form.deliveryInstructions.trim() || '') === current) return
+
+  const address = entry.address
+
+  storeShippingAddress(
+    {
+      first_name: address.firstName,
+      last_name: address.lastName,
+      company_name: address.companyName || null,
+      line1: address.line1,
+      line2: address.line2 || null,
+      city: address.city,
+      postcode: address.postcode,
+      country_code: address.countryCode,
+      phone: address.phone || null,
+      delivery_instructions: deliveryInstructions(),
+    },
+    {
+      onStart: () => {
+        saving.value = true
+        errors.value = {}
+      },
+      onError: (err) => (errors.value = err),
+      onFinish: () => (saving.value = false),
+    },
+  )
 }
 
 // The cart address is the source of truth for whether the shipping step is
@@ -199,6 +251,7 @@ function save() {
       postcode: form.postcode,
       country_code: form.country,
       phone: form.phone || null,
+      delivery_instructions: deliveryInstructions(),
     },
     {
       onStart: () => {
@@ -303,6 +356,18 @@ function save() {
           <div v-else class="deliver-to">
             <p class="deliver-to-name">{{ saving ? 'Applying your address…' : choosePrompt }}</p>
           </div>
+
+          <div v-if="showInstructions && selectedEntry" class="fl" style="margin-top: 12px">
+            <textarea
+              id="delivery-instructions"
+              v-model="form.deliveryInstructions"
+              rows="2"
+              maxlength="1000"
+              placeholder=" "
+              @blur="saveInstructions"
+            ></textarea>
+            <label for="delivery-instructions">Delivery instructions (optional)</label>
+          </div>
         </template>
       </div>
 
@@ -321,6 +386,23 @@ function save() {
       <AddressFields :form="form" :errors="errors" />
 
       <div class="stack" style="margin-top: 12px">
+        <div v-if="showInstructions">
+          <div class="fl" :class="{ 'has-error': errors.delivery_instructions }">
+            <textarea
+              id="delivery-instructions"
+              v-model="form.deliveryInstructions"
+              rows="2"
+              maxlength="1000"
+              placeholder=" "
+            ></textarea>
+            <label for="delivery-instructions">Delivery instructions (optional)</label>
+          </div>
+          <p v-if="errors.delivery_instructions" class="help" role="alert" style="color: var(--error-700)">
+            {{ errors.delivery_instructions }}
+          </p>
+          <p v-else class="help">For example, a gate code or a safe place to leave the parcel.</p>
+        </div>
+
         <p v-for="message in otherErrors" :key="message" class="help" role="alert" style="color: var(--error-700)">
           {{ message }}
         </p>

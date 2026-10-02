@@ -36,6 +36,7 @@ it('projects the signed-in customer\'s address book, shipping default first', fu
         'city' => 'London',
         'postcode' => 'SE1 1AA',
         'contact_phone' => '07000000000',
+        'delivery_instructions' => 'Leave with reception',
         'shipping_default' => false,
     ]);
     Address::factory()->create([
@@ -64,7 +65,8 @@ it('projects the signed-in customer\'s address book, shipping default first', fu
         ->assertJsonPath('props.checkout.savedAddresses.0.address.countryCode', 'GB')
         ->assertJsonPath('props.checkout.savedAddresses.1.address.line1', '12 Trade Counter Way')
         ->assertJsonPath('props.checkout.savedAddresses.1.address.firstName', 'Alec')
-        ->assertJsonPath('props.checkout.savedAddresses.1.address.phone', '07000000000');
+        ->assertJsonPath('props.checkout.savedAddresses.1.address.phone', '07000000000')
+        ->assertJsonPath('props.checkout.savedAddresses.1.address.deliveryInstructions', 'Leave with reception');
 });
 
 it('leads with the last-used address ahead of the shipping default', function () {

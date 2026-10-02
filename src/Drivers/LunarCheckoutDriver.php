@@ -908,6 +908,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
             'postcode' => $data['postcode'] ?? null,
             'contact_phone' => $data['phone'] ?? null,
             'contact_email' => $data['email'] ?? null,
+            'delivery_instructions' => $data['delivery_instructions'] ?? null,
             'country_id' => is_string($countryCode)
                 ? Country::query()->where('iso2', strtoupper($countryCode))->value('id')
                 : null,
@@ -933,6 +934,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
             postcode: $address->postcode,
             phone: $address->contact_phone,
             email: $address->contact_email,
+            deliveryInstructions: $address->delivery_instructions,
         );
     }
 }

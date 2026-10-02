@@ -22,5 +22,6 @@ class CheckoutAddress extends Data
         public ?string $postcode = null,
         public ?string $phone = null,
         public ?string $email = null,
+        public ?string $deliveryInstructions = null,
     ) {}
 }

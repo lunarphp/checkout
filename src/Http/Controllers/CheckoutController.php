@@ -668,7 +668,11 @@ class CheckoutController extends Controller
         $cart = Cart::query()->findOrFail((int) $session->cart_reference);
 
         $data = $request->validate(
-            $this->addressRules(array_column($this->projectCountries($cart), 'code')),
+            [
+                ...$this->addressRules(array_column($this->projectCountries($cart), 'code')),
+                // Delivery only: the billing store never accepts the key.
+                'delivery_instructions' => ['nullable', 'string', 'max:1000'],
+            ],
             ['country_code.in' => 'We do not deliver to that country.'],
         );
 
@@ -746,6 +750,7 @@ class CheckoutController extends Controller
                     state: $address->state,
                     postcode: $address->postcode,
                     phone: $address->contact_phone,
+                    deliveryInstructions: $address->delivery_instructions,
                 ),
             ])
             ->all();
