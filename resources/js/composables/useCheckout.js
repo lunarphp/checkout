@@ -129,7 +129,7 @@ export function createCheckout(data) {
     payError: '',
     discount: null, // { code, type, value, label }
     discountError: '',
-    addressValid: Boolean(data.shippingAddress?.postcode),
+    addressValid: Boolean(data.addressComplete),
     processing: false,
     paid: false,
   })
@@ -168,7 +168,7 @@ export function createCheckout(data) {
     state.paymentMethods = fresh.paymentMethods ?? []
     state.paymentUnavailable = fresh.paymentUnavailable ?? []
     state.fingerprint = fresh.fingerprint ?? null
-    state.addressValid = Boolean(fresh.shippingAddress?.postcode)
+    state.addressValid = Boolean(fresh.addressComplete)
 
     if (!state.paymentMethods.some((m) => m.handle === state.method)) {
       state.method = state.paymentMethods[0]?.handle ?? null

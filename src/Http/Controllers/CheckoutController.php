@@ -415,7 +415,11 @@ class CheckoutController extends Controller
             // or, null, follows the delivery country in the browser.
             'pickupOrigin' => PickupPoints::origin($cart)?->toArray(),
             'distanceUnit' => config('lunar.checkout.pickup.distance_unit'),
-            'shippingAddress' => $driver->getShippingAddress($session),
+            'shippingAddress' => $shippingAddress = $driver->getShippingAddress($session),
+            // A postcode alone (kept from a basket delivery estimate) prefills
+            // the delivery step but does not finish it: shipping unlocks on a
+            // street address.
+            'addressComplete' => filled($shippingAddress?->postcode) && filled($shippingAddress?->line1),
             // Null until the customer captures one of their own or pay()
             // copies the delivery address across; the frontend reads a
             // stored address that differs from delivery as "not the same".
