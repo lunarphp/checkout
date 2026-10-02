@@ -192,5 +192,7 @@ it('places an express collect order from the basket page wallet', function () {
     expect($session->refresh()->status)->toBeInstanceOf(Completed::class)
         ->and($line->meta['collect'])->toBeTrue()
         ->and($line->meta['pickup_point']['handle'])->toBe('dartford')
-        ->and($order->meta['fulfilment'])->toBe('collect');
+        ->and($order->meta['fulfilment'])->toBe('collect')
+        ->and($order->shippingAddress->contact_email)->toBe('terry@example.com')
+        ->and($order->billingAddress->contact_email)->toBe('terry@example.com');
 });

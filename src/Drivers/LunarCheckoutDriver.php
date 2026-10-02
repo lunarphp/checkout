@@ -175,6 +175,8 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
              */
             $order = $cart->completedOrder ?: $cart->draftOrder ?: $cart->createOrder();
 
+            $this->stampContactEmail($session, $cart, $order);
+
             /*
              * How the customer chose to pay, for the panel, mails and any
              * ERP feed (spec 0014 §D). The session records the handle at the
@@ -388,7 +390,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         // when the new address still offers it.
         $previousOption = $cart->shippingAddress?->shipping_option;
 
-        $cart->setShippingAddress($this->toCartAddressData($data));
+        $cart->setShippingAddress($this->withContactEmail($session, $cart->shippingAddress, $data));
 
         if ($previousOption !== null) {
             $option = $this->shippingManifest->getOption($cart, $previousOption);
@@ -415,7 +417,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
     {
         $cart = $this->operableCart($session);
 
-        $cart->setBillingAddress($this->toCartAddressData($data));
+        $cart->setBillingAddress($this->withContactEmail($session, $cart->billingAddress, $data));
 
         // Spec 0013 §F: a wallet sheet started in collect mode asks for no
         // shipping address, so this billing address is the only one the cart
@@ -425,7 +427,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         // no address and no collect option, and the hold is refused. The
         // address is the customer's own either way.
         if ($cart->shippingAddress === null && PickupPoints::fulfilment($cart) === PickupPoints::COLLECT) {
-            $cart->setShippingAddress($this->toCartAddressData($data));
+            $cart->setShippingAddress($this->withContactEmail($session, null, $data));
             $cart = $this->setFulfilment->execute($cart->refresh(), PickupPoints::COLLECT);
         }
 
@@ -839,6 +841,47 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         if (! is_string($email) || trim($email) === '') {
             throw new PaymentConfirmationException('contact_required');
         }
+    }
+
+    /**
+     * The address payload with the customer's email carried over. Lunar
+     * rewrites the address row wholesale and the address forms never send an
+     * email, so without this the contact step's email is wiped. An email the
+     * payload carries (a wallet sheet's) wins, then the row's own, then the
+     * session's.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function withContactEmail(CheckoutSession $session, ?CartAddress $existing, array $data): array
+    {
+        $address = $this->toCartAddressData($data);
+        $email = $address['contact_email'] ?? $existing?->contact_email ?? $session->customer_email;
+
+        if (is_string($email) && trim($email) !== '') {
+            $address['contact_email'] = $email;
+        }
+
+        return $address;
+    }
+
+    /**
+     * Give every address on the placed order an email to write to. The cart's
+     * rows can still lack one (contact given after the last address write, or
+     * a signed-in customer known only through the account), and the order is
+     * what confirmations and the panel read.
+     */
+    private function stampContactEmail(CheckoutSession $session, Cart $cart, Order $order): void
+    {
+        $email = $session->customer_email ?? $cart->user?->email;
+
+        if (! is_string($email) || trim($email) === '') {
+            return;
+        }
+
+        $order->addresses()
+            ->where(fn ($query) => $query->whereNull('contact_email')->orWhere('contact_email', ''))
+            ->update(['contact_email' => $email]);
     }
 
     /**
