@@ -491,6 +491,9 @@ class CheckoutController extends Controller
             // Escape hatch back to the store (the basket, usually):
             // session cancel_url, then the store-wide config default.
             'back' => $this->cancelUrl($session),
+            // The store's policy pages (config urls.legal); unset ones are
+            // dropped so the page never links to nothing.
+            'legal' => array_filter((array) config('lunar.checkout.urls.legal', [])),
             // Null when no driver can answer, which is how the delivery
             // step knows to render manual entry instead of a dead search.
             'addressLookup' => $this->addressLookup->isAvailable()

@@ -8,6 +8,8 @@ import OrderSummary from '../components/OrderSummary.vue'
 import PayErrorToast from '../components/PayErrorToast.vue'
 import { COLLECT_UNAVAILABLE, createCheckout } from '../composables/useCheckout.js'
 import { useCheckoutTheme } from '../composables/useCheckoutTheme.js'
+import PolicyLink from '../components/PolicyLink.vue'
+import LegalFooter from '../components/LegalFooter.vue'
 import { resolveElement } from '../composables/elements.js'
 
 /**
@@ -813,15 +815,13 @@ async function confirmAndPay() {
 
           <div class="cta-wrap desktop-cta">
             <p class="legal">
-              By confirming you agree to our <a href="#">terms</a> and <a href="#">refund policy</a>. You can cancel
-              anytime before dispatch.
+              By confirming you agree to our <PolicyLink :href="state.urls.legal?.terms">terms</PolicyLink> and
+              <PolicyLink :href="state.urls.legal?.refunds">refund policy</PolicyLink>. You can cancel anytime before
+              dispatch.
             </p>
           </div>
 
-          <div class="foot">
-            <a href="#">Refund policy</a><a href="#">Shipping</a><a href="#">Privacy policy</a
-            ><a href="#">Terms of service</a><a href="#">Contact</a>
-          </div>
+          <LegalFooter :links="state.urls.legal" />
           <div class="powered-by">
             <span>Powered by</span>
             <span class="pw">Lunar<span class="dot">.</span></span>

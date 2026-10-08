@@ -107,6 +107,19 @@ return [
     'urls' => [
         'success' => env('CHECKOUT_SUCCESS_URL'),
         'cancel' => env('CHECKOUT_CANCEL_URL'),
+
+        /*
+         * The store's policy pages, linked from the "you agree to our terms"
+         * line and the checkout footer. Unset ones are left out rather than
+         * linked to nothing.
+         */
+        'legal' => [
+            'terms' => null,
+            'refunds' => null,
+            'shipping' => null,
+            'privacy' => null,
+            'contact' => null,
+        ],
     ],
 
     'reconciliation' => [

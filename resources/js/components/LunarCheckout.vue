@@ -12,6 +12,8 @@ import PaymentSection from './PaymentSection.vue'
 import OrderSummary from './OrderSummary.vue'
 import PayErrorToast from './PayErrorToast.vue'
 import SuccessOverlay from './SuccessOverlay.vue'
+import PolicyLink from './PolicyLink.vue'
+import LegalFooter from './LegalFooter.vue'
 import { COLLECT_UNAVAILABLE, createCheckout } from '../composables/useCheckout.js'
 import { useCheckoutTheme } from '../composables/useCheckoutTheme.js'
 import { resolveElement } from '../composables/elements.js'
@@ -150,14 +152,14 @@ const mSummaryOpen = ref(false)
                 <template v-else>Complete the steps above to place your order.</template>
               </p>
               <p class="legal">
-                By {{ paysAtCheckout ? 'paying' : 'placing your order' }} you agree to our <a href="#">terms</a> and
-                <a href="#">refund policy</a>. You can cancel anytime before dispatch.
+                By {{ paysAtCheckout ? 'paying' : 'placing your order' }} you agree to our
+                <PolicyLink :href="state.urls.legal?.terms">terms</PolicyLink> and
+                <PolicyLink :href="state.urls.legal?.refunds">refund policy</PolicyLink>. You can cancel anytime before
+                dispatch.
               </p>
             </div>
 
-            <div class="foot">
-              <a href="#">Refund policy</a><a href="#">Shipping</a><a href="#">Privacy policy</a><a href="#">Terms of service</a><a href="#">Contact</a>
-            </div>
+            <LegalFooter :links="state.urls.legal" />
             <div class="powered-by">
               <span>Powered by</span>
               <span class="pw">Lunar<span class="dot">.</span></span>

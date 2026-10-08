@@ -146,3 +146,35 @@ it('renders the checkout for the owning cart', function () {
     fn (): bool => ! is_file(public_path('vendor/lunarphp/checkout/build/manifest.json')),
     'Requires the published checkout app build (vendor:publish --tag=lunar-checkout-assets).',
 );
+
+it('projects the store policy pages that are set, and only those', function () {
+    config()->set('lunar.checkout.urls.legal', [
+        'terms' => 'https://store.test/pages/terms',
+        'refunds' => 'https://store.test/pages/returns',
+        'shipping' => null,
+        'privacy' => 'https://store.test/pages/privacy',
+        'contact' => null,
+    ]);
+
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+
+    $this->get(route('lunar.checkout.show', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertOk()
+        ->assertJsonPath('props.checkout.urls.legal', [
+            'terms' => 'https://store.test/pages/terms',
+            'refunds' => 'https://store.test/pages/returns',
+            'privacy' => 'https://store.test/pages/privacy',
+        ]);
+});
+
+it('projects no policy pages by default', function () {
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+
+    $this->get(route('lunar.checkout.show', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertOk()
+        ->assertJsonPath('props.checkout.urls.legal', []);
+});
