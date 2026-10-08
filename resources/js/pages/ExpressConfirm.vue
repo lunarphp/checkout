@@ -8,6 +8,7 @@ import OrderSummary from '../components/OrderSummary.vue'
 import PayErrorToast from '../components/PayErrorToast.vue'
 import { COLLECT_UNAVAILABLE, createCheckout } from '../composables/useCheckout.js'
 import { useCheckoutTheme } from '../composables/useCheckoutTheme.js'
+import { useMarketingOptIn } from '../composables/useMarketingOptIn.js'
 import PolicyLink from '../components/PolicyLink.vue'
 import LegalFooter from '../components/LegalFooter.vue'
 import { resolveElement } from '../composables/elements.js'
@@ -318,7 +319,8 @@ function flushDetails() {
 const unregisterDetails = registerPendingWrite(flushDetails)
 onBeforeUnmount(unregisterDetails)
 
-const newsOptIn = ref(false) // presentational, same as ContactSection's marketing checkbox
+// Marketing tick, as the contact step's: only when the host registers it.
+const marketing = useMarketingOptIn(store)
 
 // ── Confirm & pay ────────────────────────────────────────────────────────
 const confirming = ref(false)
@@ -804,10 +806,14 @@ async function confirmAndPay() {
                   </p>
                 </div>
 
-                <label class="check xc-gap-marketing">
-                  <input v-model="newsOptIn" type="checkbox" />
+                <label v-if="marketing.available.value" class="check xc-gap-marketing">
+                  <input
+                    type="checkbox"
+                    :checked="marketing.optIn.value"
+                    @change="marketing.setOptIn($event.target.checked)"
+                  />
                   <span class="box ico"><Icon name="check" /></span>
-                  <span class="txt">Email me with order updates and occasional offers.</span>
+                  <span class="txt">{{ marketing.label.value }}</span>
                 </label>
               </div>
             </div>

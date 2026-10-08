@@ -4,6 +4,7 @@ import { router, useHttp } from '@inertiajs/vue3'
 import Icon from './primitives/Icon.vue'
 import FloatingField from './primitives/FloatingField.vue'
 import { useCheckout } from '../composables/useCheckout.js'
+import { useMarketingOptIn } from '../composables/useMarketingOptIn.js'
 
 // The server-projected `contact` element carries auth state and the endpoints
 // (lookupUrl / contactUrl / loginUrl). Without it — the host hasn't registered
@@ -19,7 +20,9 @@ const wired = computed(() => Boolean(props.element))
 const signedIn = computed(() => Boolean(p.value.signedIn))
 
 const email = ref(p.value.email ?? '')
-const news = ref(false) // presentational — marketing opt-in lands with its own flow
+// Marketing tick: rendered only when the host registers the `marketing`
+// element, which is what persists it.
+const marketing = useMarketingOptIn()
 
 // Guest phases: editing → done. A persisted email round-trips via props.email,
 // so a fresh render resumes in `done`.
@@ -420,10 +423,14 @@ async function signOut() {
       </template>
 
       <template v-else>
-        <label class="check">
-          <input type="checkbox" v-model="news" />
+        <label v-if="marketing.available.value" class="check">
+          <input
+            type="checkbox"
+            :checked="marketing.optIn.value"
+            @change="marketing.setOptIn($event.target.checked)"
+          />
           <span class="box ico"><Icon name="check" /></span>
-          <span class="txt">Email me with order updates and offers.</span>
+          <span class="txt">{{ marketing.label.value }}</span>
         </label>
         <button
           v-if="wired"

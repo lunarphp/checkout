@@ -122,6 +122,21 @@ return [
         ],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Marketing opt-in
+    |--------------------------------------------------------------------------
+    |
+    | The wording beside the "email me offers" tick, shown when the host
+    | registers the MarketingOptIn element. What the tick feeds is the
+    | host's to decide.
+    |
+    */
+
+    'marketing' => [
+        'label' => 'Email me with offers and new products.',
+    ],
+
     'reconciliation' => [
         'after_minutes' => 60,
         'max_attempts' => 5,
