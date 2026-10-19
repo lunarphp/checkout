@@ -387,3 +387,14 @@ it('still forbids polling a completed session from a browser that never pinned i
     $this->get(route('lunar.checkout.processing', $session->uuid))
         ->assertForbidden();
 });
+
+it('refuses to create a payment intent for a completed session', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+    $session->forceFill(['status' => Completed::$name])->save();
+
+    $this->postJson(route('lunar.checkout.payment-intent.store', $session->uuid), [
+        'payment_method' => 'card',
+    ])->assertStatus(409);
+});

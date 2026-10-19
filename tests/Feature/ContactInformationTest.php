@@ -141,6 +141,18 @@ it('refuses a guest email change on a completed session', function () {
     expect($session->fresh()->customer_email)->toBe('paid@example.test');
 });
 
+it('refuses a guest email change on an expired session', function () {
+    $cart = routeTestCart();
+    $session = app(CheckoutDriver::class)->createSession($cart);
+    $session->forceFill(['expires_at' => now()->subMinute()])->save();
+    CartSession::use($cart);
+
+    $this->postJson(route('lunar.checkout.contact.store', $session->uuid), ['email' => 'late@example.test'])
+        ->assertStatus(410);
+
+    expect($session->fresh()->customer_email)->toBeNull();
+});
+
 it('refuses an email with no domain', function (string $route) {
     $cart = routeTestCart();
     $session = app(CheckoutDriver::class)->createSession($cart);

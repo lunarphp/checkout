@@ -14,11 +14,17 @@ use Lunar\Core\Models\Order;
  * The gateway-agnostic success bridge (spec 0002 §D): any gateway driver that
  * authorises a payment dispatches PaymentAttemptEvent; when the paid order's
  * cart has a session pinned at the pay boundary, the checkout driver completes
- * it — session → Completed, order adopted as its order_reference.
+ * it — session → Completed, order adopted as its order_reference. A session
+ * still Open (the customer confirmed with the gateway without the pay step)
+ * is pinned here first; see pinForGatewayPayment().
  *
  * complete() is idempotent (terminal short-circuit + guarded transition), so
  * webhook replays, the reconciliation sweep, and this listener can all race
  * safely — exactly one completion wins.
+ *
+ * An OrderPlacing listener must not authorise a payment itself: during a
+ * synchronous complete() the session is still Open, so this listener would
+ * pin and complete it re-entrantly.
  */
 class CompleteSessionOnPaymentSuccess
 {
@@ -50,7 +56,12 @@ class CompleteSessionOnPaymentSuccess
             return;
         }
 
-        if ($session->status instanceof Open && ! $this->pinForGatewayPayment($session)) {
+        /*
+         * A hold-mode session stays Open on purpose until the customer
+         * finishes on the confirm page, which captures at reconcile; it is
+         * never adopted from here.
+         */
+        if ($session->status instanceof Open && ($session->isHoldMode() || ! $this->pinForGatewayPayment($session))) {
             return;
         }
 
@@ -81,7 +92,9 @@ class CompleteSessionOnPaymentSuccess
                 'amount_total' => $live->amountTotal,
                 'cart_fingerprint' => $live->fingerprint,
                 'payment_processing_at' => now(),
-                'meta' => json_encode(array_merge((array) $session->meta, ['completed_without_pay_step' => true])),
+                // A JSON-path write, so a concurrent meta write (intent
+                // renewal, payment handle) is not overwritten.
+                'meta->completed_without_pay_step' => true,
                 'updated_at' => now(),
             ]);
 

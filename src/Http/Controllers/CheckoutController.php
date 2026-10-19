@@ -962,6 +962,7 @@ class CheckoutController extends Controller
     public function storePaymentIntent(Request $request, CheckoutSessionModel $session, PaymentMethodRegistry $methods): JsonResponse
     {
         $this->ensureOwnership($session);
+        $this->ensureOperable($session);
 
         $data = $request->validate([
             'payment_method' => ['required', 'string'],

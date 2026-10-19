@@ -62,3 +62,59 @@ it('leaves an open session alone when the gateway reports a failed payment', fun
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
 });
+
+it('completes only once when the gateway replays the success', function () {
+    Event::fake([OrderPlacing::class]);
+
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+
+    $order = $cart->createOrder();
+    gatewayPlacesOrder($order);
+    gatewayPlacesOrder($order->fresh());
+
+    expect($session->refresh()->status)->toBeInstanceOf(Completed::class);
+
+    Event::assertDispatchedTimes(OrderPlacing::class, 1);
+});
+
+it('adopts the payment even when the open session has expired', function () {
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+    $session->forceFill(['expires_at' => now()->subMinute()])->save();
+
+    $order = $cart->createOrder();
+    gatewayPlacesOrder($order);
+
+    expect($session->refresh()->status)->toBeInstanceOf(Completed::class)
+        ->and((string) $session->order_reference)->toBe((string) $order->id);
+});
+
+it('keeps the payment method chosen before the gateway took payment', function () {
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+    $session->forceFill(['meta' => ['payment_method' => 'stripe']])->save();
+
+    gatewayPlacesOrder($cart->createOrder());
+
+    $session->refresh();
+
+    expect($session->meta['payment_method'] ?? null)->toBe('stripe')
+        ->and($session->meta['completed_without_pay_step'] ?? null)->toBeTrue()
+        ->and($session->cart_fingerprint)->not->toBeNull()
+        ->and($session->payment_processing_at)->not->toBeNull();
+});
+
+it('never adopts an open hold-mode session', function () {
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+    $session->forceFill(['meta' => ['payment_intent_mode' => 'hold']])->save();
+
+    gatewayPlacesOrder($cart->createOrder());
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
