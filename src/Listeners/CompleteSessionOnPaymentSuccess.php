@@ -2,6 +2,7 @@
 
 namespace Lunar\Checkout\Listeners;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\Models\CheckoutSession;
@@ -83,20 +84,35 @@ class CompleteSessionOnPaymentSuccess
     {
         $live = $this->driver->snapshot($session);
 
-        $pinned = CheckoutSession::query()
-            ->whereKey($session->getKey())
-            ->where('status', Open::$name)
-            ->update([
-                'status' => PaymentProcessing::$name,
-                'amount_subtotal' => $live->amountSubtotal,
-                'amount_total' => $live->amountTotal,
-                'cart_fingerprint' => $live->fingerprint,
-                'payment_processing_at' => now(),
-                // A JSON-path write, so a concurrent meta write (intent
-                // renewal, payment handle) is not overwritten.
-                'meta->completed_without_pay_step' => true,
-                'updated_at' => now(),
-            ]);
+        /*
+         * Re-read under a row lock and write the merged meta, so a
+         * concurrent meta write (intent renewal, payment handle) is not
+         * lost. Not a JSON-path update: MySQL's JSON_SET on a NULL column
+         * returns NULL and would drop the flag.
+         */
+        $pinned = DB::transaction(function () use ($session, $live): int {
+            $locked = CheckoutSession::query()
+                ->whereKey($session->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($locked === null || ! $locked->status instanceof Open) {
+                return 0;
+            }
+
+            return CheckoutSession::query()
+                ->whereKey($session->getKey())
+                ->where('status', Open::$name)
+                ->update([
+                    'status' => PaymentProcessing::$name,
+                    'amount_subtotal' => $live->amountSubtotal,
+                    'amount_total' => $live->amountTotal,
+                    'cart_fingerprint' => $live->fingerprint,
+                    'payment_processing_at' => now(),
+                    'meta' => json_encode(array_merge((array) $locked->meta, ['completed_without_pay_step' => true])),
+                    'updated_at' => now(),
+                ]);
+        });
 
         $session->refresh();
 

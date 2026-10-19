@@ -964,6 +964,12 @@ class CheckoutController extends Controller
         $this->ensureOwnership($session);
         $this->ensureOperable($session);
 
+        // A pinned session's intent is the one being charged; replacing it
+        // would leave reconciliation polling an unconfirmed intent.
+        if ($session->status instanceof PaymentProcessing) {
+            throw new CheckoutSessionConflictException('frozen');
+        }
+
         $data = $request->validate([
             'payment_method' => ['required', 'string'],
             'mode' => ['sometimes', 'string', 'in:hold'],

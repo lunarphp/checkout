@@ -398,3 +398,16 @@ it('refuses to create a payment intent for a completed session', function () {
         'payment_method' => 'card',
     ])->assertStatus(409);
 });
+
+it('refuses to replace the payment intent of a session pinned for payment', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+    $session->forceFill(['status' => PaymentProcessing::$name, 'payment_intent_ref' => 'pi_charged'])->save();
+
+    $this->postJson(route('lunar.checkout.payment-intent.store', $session->uuid), [
+        'payment_method' => 'card',
+    ])->assertStatus(409)->assertJsonPath('reason', 'frozen');
+
+    expect($session->fresh()->payment_intent_ref)->toBe('pi_charged');
+});
