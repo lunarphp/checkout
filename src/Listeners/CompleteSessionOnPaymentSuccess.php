@@ -49,8 +49,9 @@ class CompleteSessionOnPaymentSuccess
 
         $session = CheckoutSession::query()
             ->where('cart_reference', (string) $cartId)
+            // At most one: active_cart_reference is unique across live
+            // (Open / PaymentProcessing) sessions.
             ->whereIn('status', [PaymentProcessing::$name, Open::$name])
-            ->orderByRaw('case when status = ? then 0 else 1 end', [PaymentProcessing::$name])
             ->first();
 
         if ($session === null) {
@@ -82,15 +83,19 @@ class CompleteSessionOnPaymentSuccess
      */
     private function pinForGatewayPayment(CheckoutSession $session): bool
     {
-        $live = $this->driver->snapshot($session);
-
         /*
          * Re-read under a row lock and write the merged meta, so a
          * concurrent meta write (intent renewal, payment handle) is not
          * lost. Not a JSON-path update: MySQL's JSON_SET on a NULL column
          * returns NULL and would drop the flag.
+         *
+         * The status moves with the same guarded raw update the pay
+         * boundary uses (LunarCheckoutDriver::assertReadyForPayment()):
+         * session states change through these one-statement guards, not
+         * model transitions. The snapshot is taken under the lock; complete()
+         * re-verifies it against the cart under the cart-row lock anyway.
          */
-        $pinned = DB::transaction(function () use ($session, $live): int {
+        $pinned = DB::transaction(function () use ($session): int {
             $locked = CheckoutSession::query()
                 ->whereKey($session->getKey())
                 ->lockForUpdate()
@@ -99,6 +104,8 @@ class CompleteSessionOnPaymentSuccess
             if ($locked === null || ! $locked->status instanceof Open) {
                 return 0;
             }
+
+            $live = $this->driver->snapshot($locked);
 
             return CheckoutSession::query()
                 ->whereKey($session->getKey())

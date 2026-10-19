@@ -2,18 +2,84 @@
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Lunar\Checkout\Contracts\CheckoutDriver;
+use Lunar\Checkout\Contracts\PaymentMethodRegistry;
 use Lunar\Checkout\Events\OrderPlacing;
+use Lunar\Checkout\Models\CheckoutSession;
+use Lunar\Checkout\PaymentMethods\AbstractPaymentMethod;
+use Lunar\Checkout\States\CheckoutSession\Cancelled;
 use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
+use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
+use Lunar\Core\Contracts\CreatesPaymentIntents;
 use Lunar\Core\DataObjects\PaymentAuthorize;
+use Lunar\Core\DataObjects\PaymentIntentDescriptor;
 use Lunar\Core\Events\PaymentAttemptEvent;
 use Lunar\Core\Facades\CartSession;
+use Lunar\Core\Facades\Payments;
+use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Order;
+use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
 
 uses(TestCase::class, RefreshDatabase::class);
+
+/** A Stripe-like gateway: the browser gets an intent it can confirm directly. */
+class WebhookFirstIntentGateway extends OfflinePayment implements CreatesPaymentIntents
+{
+    public function createIntent(Cart $cart): PaymentIntentDescriptor
+    {
+        return new PaymentIntentDescriptor('pi_webhook_first_'.$cart->id, 'secret_'.$cart->id);
+    }
+}
+
+class WebhookFirstIntentMethod extends AbstractPaymentMethod
+{
+    public function handle(): string
+    {
+        return 'webhook-first-card';
+    }
+
+    public function label(): string
+    {
+        return 'Card';
+    }
+
+    public function driver(): string
+    {
+        return 'webhook-first-intents';
+    }
+
+    public function requiresIntent(): bool
+    {
+        return true;
+    }
+
+    public function component(): string
+    {
+        return 'stripe-card';
+    }
+}
+
+/**
+ * Swap the checkout driver for a proxy whose snapshot() first runs $race,
+ * standing in for another process moving the session while the listener
+ * holds its lock-free view of it.
+ */
+function raceTheListener(Closure $race): void
+{
+    $real = app(CheckoutDriver::class);
+    $proxy = Mockery::mock($real)->makePartial();
+    $proxy->shouldReceive('snapshot')->andReturnUsing(function (CheckoutSession $session) use ($real, $race) {
+        $race($session);
+
+        return $real->snapshot($session);
+    });
+
+    app()->instance(CheckoutDriver::class, $proxy);
+}
 
 /**
  * The gateway placed an order for the cart (its webhook authorised a payment
@@ -117,4 +183,63 @@ it('never adopts an open hold-mode session', function () {
     gatewayPlacesOrder($cart->createOrder());
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('lets the browser that created the intent reach the confirmation after a webhook-first completion', function () {
+    Payments::extend('webhook-first-intents', fn () => app(WebhookFirstIntentGateway::class));
+    app(PaymentMethodRegistry::class)->add(WebhookFirstIntentMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+
+    $this->postJson(route('lunar.checkout.payment-intent.store', $session->uuid), [
+        'payment_method' => 'webhook-first-card',
+    ])->assertSuccessful();
+
+    // The customer confirms with the gateway directly; the webhook places
+    // the order before the browser's first processing poll.
+    $cart = Cart::find($session->cart_reference);
+    gatewayPlacesOrder($cart->createOrder());
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Completed::class);
+
+    $this->get(route('lunar.checkout.processing', $session->uuid))
+        ->assertRedirect($session->success_url ?: (config('lunar.checkout.urls.success') ?: '/'))
+        ->assertSessionHas('lunar.checkout.completed.order_reference', $session->order_reference);
+});
+
+it('still completes when the pay step pins the session first, without flagging it', function () {
+    Log::spy();
+
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+
+    raceTheListener(fn (CheckoutSession $s) => CheckoutSession::query()->whereKey($s->getKey())
+        ->update(['status' => PaymentProcessing::$name, 'cart_fingerprint' => $s->cart_fingerprint]));
+
+    gatewayPlacesOrder($cart->createOrder());
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Completed::class)
+        ->and($session->meta['completed_without_pay_step'] ?? null)->toBeNull();
+
+    Log::shouldNotHaveReceived('warning');
+});
+
+it('leaves a session alone when another process ends it first', function () {
+    Log::spy();
+
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+
+    raceTheListener(fn (CheckoutSession $s) => CheckoutSession::query()->whereKey($s->getKey())
+        ->update(['status' => Cancelled::$name]));
+
+    gatewayPlacesOrder($cart->createOrder());
+
+    expect($session->refresh()->status)->toBeInstanceOf(Cancelled::class);
+
+    Log::shouldNotHaveReceived('warning');
 });
