@@ -1107,7 +1107,9 @@ class CheckoutController extends Controller
 
         // This browser now holds an intent it can confirm with the gateway
         // directly; if the webhook completes the order first, its processing
-        // poll must still reach the confirmation.
+        // poll must still reach the confirmation. The grant's clock starts
+        // here, so a customer who sits on the card form past the TTL and
+        // then confirms directly falls back to the cart ownership check.
         $this->rememberPinnedSession($session);
 
         return response()->json([
