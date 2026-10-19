@@ -29,6 +29,8 @@ use Lunar\Checkout\DataObjects\CheckoutAddress;
 use Lunar\Checkout\DataObjects\CheckoutTheme;
 use Lunar\Checkout\Events\CheckoutElementStored;
 use Lunar\Checkout\Exceptions\AddressLookupException;
+use Lunar\Checkout\Exceptions\CheckoutSessionConflictException;
+use Lunar\Checkout\Exceptions\CheckoutSessionNotOperableException;
 use Lunar\Checkout\Exceptions\PaymentConfirmationException;
 use Lunar\Checkout\Exceptions\RollbackQuote;
 use Lunar\Checkout\Express;
@@ -56,6 +58,12 @@ use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 
 class CheckoutController extends Controller
 {
+    /** Browser-session key listing the checkout sessions this browser pinned for payment. */
+    private const PINNED_SESSIONS_KEY = 'lunar.checkout.pinned';
+
+    /** Seconds a pinned-session ownership grant stays valid. */
+    private const PINNED_SESSION_TTL = 3600;
+
     /**
      * Collaborators are constructor-injected per the service-layer DI rule
      * (spec 0016): the element registry and the address lookup are bound to
@@ -353,6 +361,23 @@ class CheckoutController extends Controller
      */
     private function ensureOwnership(CheckoutSessionModel $session): void
     {
+        /*
+         * The browser that pinned this session for payment owns it through
+         * the gateway round-trip. Checked before CartSession::current(): once
+         * a webhook has placed the order, current() mints the browser a fresh
+         * cart, so the cart id no longer proves anything and the guest's
+         * processing poll would 403 instead of reaching the confirmation.
+         * The grant lapses after PINNED_SESSION_TTL so a shared browser
+         * does not keep an earlier guest's completed order reachable.
+         */
+        $pinnedAt = ((array) session()->get(self::PINNED_SESSIONS_KEY, []))[$session->uuid] ?? null;
+
+        if (($session->status instanceof PaymentProcessing || $session->status instanceof Completed)
+            && is_int($pinnedAt)
+            && now()->timestamp - $pinnedAt <= self::PINNED_SESSION_TTL) {
+            return;
+        }
+
         $cart = CartSession::current();
 
         if ($cart !== null && (string) $cart->id === $session->cart_reference) {
@@ -368,6 +393,38 @@ class CheckoutController extends Controller
             $customerId !== null && (string) $customerId === $session->customer_reference,
             403,
         );
+    }
+
+    /**
+     * Record in the browser session that this browser pinned the checkout
+     * session for payment (or holds an intent it can confirm with the
+     * gateway), so ensureOwnership() still recognises it after a webhook
+     * completes the order. Keyed by UUID with the time it was recorded;
+     * only the most recent few are kept.
+     */
+    private function rememberPinnedSession(CheckoutSessionModel $session): void
+    {
+        $pinned = (array) session()->get(self::PINNED_SESSIONS_KEY, []);
+        unset($pinned[$session->uuid]);
+        $pinned[$session->uuid] = now()->timestamp;
+
+        session()->put(self::PINNED_SESSIONS_KEY, array_slice($pinned, -5, preserve_keys: true));
+    }
+
+    /**
+     * The write gate shared by the routes that write session state directly,
+     * matching the driver's operableCart(): a session pinned for payment is
+     * frozen (409); a terminal or expired one is gone (410).
+     */
+    private function ensureWritable(CheckoutSessionModel $session): void
+    {
+        if ($session->status instanceof PaymentProcessing) {
+            throw new CheckoutSessionConflictException('frozen');
+        }
+
+        if (! $session->status instanceof Open || $session->isExpired()) {
+            throw new CheckoutSessionNotOperableException('The checkout session is expired or terminal.');
+        }
     }
 
     /**
@@ -656,6 +713,10 @@ class CheckoutController extends Controller
         if ($customerId !== null) {
             $checkoutDriver->associateCustomer($session, (string) $customerId, $data['email']);
         } else {
+            // Once the session is pinned for payment the contact email is
+            // part of what completion stamps on the order.
+            $this->ensureWritable($session);
+
             $session->customer_email = $data['email'];
             $session->save();
         }
@@ -918,6 +979,10 @@ class CheckoutController extends Controller
     {
         $this->ensureOwnership($session);
 
+        // A pinned session's intent is the one being charged; replacing it
+        // would leave reconciliation polling an unconfirmed intent.
+        $this->ensureWritable($session);
+
         $data = $request->validate([
             'payment_method' => ['required', 'string'],
             'mode' => ['sometimes', 'string', 'in:hold'],
@@ -1039,6 +1104,13 @@ class CheckoutController extends Controller
                 'payment_method' => 'Another payment attempt for this basket is still finishing. Wait a moment and try again.',
             ]);
         }
+
+        // This browser now holds an intent it can confirm with the gateway
+        // directly; if the webhook completes the order first, its processing
+        // poll must still reach the confirmation. The grant's clock starts
+        // here, so a customer who sits on the card form past the TTL and
+        // then confirms directly falls back to the cart ownership check.
+        $this->rememberPinnedSession($session);
 
         return response()->json([
             'intent' => $descriptor->reference,
@@ -1163,6 +1235,7 @@ class CheckoutController extends Controller
             }
 
             $checkoutDriver->assertReadyForPayment($session, $data['fingerprint']);
+            $this->rememberPinnedSession($session);
         } catch (PaymentConfirmationException $e) {
             // A stale fingerprint or a Pay pressed before the contact step is
             // routine customer behaviour; every other reason (unorderable

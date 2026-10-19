@@ -358,3 +358,76 @@ it('accepts a guest once the contact step has persisted an email', function () {
 
     expect(Order::query()->count())->toBe(1);
 });
+
+it('lets the browser that pinned a session poll it after a webhook completed it', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'fingerprint' => CheckoutCart::fingerprint($session),
+        'payment_method' => 'card',
+    ])->assertSuccessful();
+
+    // The gateway webhook wins the race: completion places the order, so the
+    // next CartSession::current() mints the browser a fresh cart.
+    app(CheckoutDriver::class)->complete($session->refresh());
+    $session->refresh();
+
+    $this->get(route('lunar.checkout.processing', $session->uuid))
+        ->assertRedirect($session->success_url ?: (config('lunar.checkout.urls.success') ?: '/'))
+        ->assertSessionHas('lunar.checkout.completed.order_reference', $session->order_reference);
+});
+
+it('lets a pinned-session ownership grant lapse after an hour', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'fingerprint' => CheckoutCart::fingerprint($session),
+        'payment_method' => 'card',
+    ])->assertSuccessful();
+
+    app(CheckoutDriver::class)->complete($session->refresh());
+
+    $this->travel(61)->minutes();
+
+    $this->get(route('lunar.checkout.processing', $session->uuid))
+        ->assertForbidden();
+});
+
+it('still forbids polling a completed session from a browser that never pinned it', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+    $session->forceFill(['status' => PaymentProcessing::$name])->save();
+    app(CheckoutDriver::class)->complete($session->refresh());
+
+    $this->get(route('lunar.checkout.processing', $session->uuid))
+        ->assertForbidden();
+});
+
+it('refuses to create a payment intent for a completed session', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+    $session->forceFill(['status' => Completed::$name])->save();
+
+    $this->postJson(route('lunar.checkout.payment-intent.store', $session->uuid), [
+        'payment_method' => 'card',
+    ])->assertStatus(410);
+});
+
+it('refuses to replace the payment intent of a session pinned for payment', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+    $session->forceFill(['status' => PaymentProcessing::$name, 'payment_intent_ref' => 'pi_charged'])->save();
+
+    $this->postJson(route('lunar.checkout.payment-intent.store', $session->uuid), [
+        'payment_method' => 'card',
+    ])->assertStatus(409)->assertJsonPath('reason', 'frozen');
+
+    expect($session->fresh()->payment_intent_ref)->toBe('pi_charged');
+});

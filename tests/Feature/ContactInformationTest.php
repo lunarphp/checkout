@@ -6,6 +6,8 @@ use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\Contracts\ElementRegistry;
 use Lunar\Checkout\Elements\ContactInformation;
 use Lunar\Checkout\Session\SessionElementStore;
+use Lunar\Checkout\States\CheckoutSession\Completed;
+use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Models\Customer;
 use Lunar\Tests\Checkout\Stubs\User;
@@ -112,6 +114,43 @@ it('stores a guest email onto the checkout session model', function () {
 
     expect($session->fresh()->customer_email)->toBe('guest@example.test')
         ->and($session->fresh()->customer_reference)->toBeNull();
+});
+
+it('refuses a guest email change once the session is pinned for payment', function () {
+    $cart = routeTestCart();
+    $session = app(CheckoutDriver::class)->createSession($cart);
+    $session->forceFill(['status' => PaymentProcessing::$name, 'customer_email' => 'paying@example.test'])->save();
+    CartSession::use($cart);
+
+    $this->postJson(route('lunar.checkout.contact.store', $session->uuid), ['email' => 'swapped@example.test'])
+        ->assertStatus(409)
+        ->assertJsonPath('reason', 'frozen');
+
+    expect($session->fresh()->customer_email)->toBe('paying@example.test');
+});
+
+it('refuses a guest email change on a completed session', function () {
+    $cart = routeTestCart();
+    $session = app(CheckoutDriver::class)->createSession($cart);
+    $session->forceFill(['status' => Completed::$name, 'customer_email' => 'paid@example.test'])->save();
+    CartSession::use($cart);
+
+    $this->postJson(route('lunar.checkout.contact.store', $session->uuid), ['email' => 'swapped@example.test'])
+        ->assertStatus(410);
+
+    expect($session->fresh()->customer_email)->toBe('paid@example.test');
+});
+
+it('refuses a guest email change on an expired session', function () {
+    $cart = routeTestCart();
+    $session = app(CheckoutDriver::class)->createSession($cart);
+    $session->forceFill(['expires_at' => now()->subMinute()])->save();
+    CartSession::use($cart);
+
+    $this->postJson(route('lunar.checkout.contact.store', $session->uuid), ['email' => 'late@example.test'])
+        ->assertStatus(410);
+
+    expect($session->fresh()->customer_email)->toBeNull();
 });
 
 it('refuses an email with no domain', function (string $route) {
