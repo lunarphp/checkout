@@ -358,3 +358,32 @@ it('accepts a guest once the contact step has persisted an email', function () {
 
     expect(Order::query()->count())->toBe(1);
 });
+
+it('lets the browser that pinned a session poll it after a webhook completed it', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'fingerprint' => CheckoutCart::fingerprint($session),
+        'payment_method' => 'card',
+    ])->assertSuccessful();
+
+    // The gateway webhook wins the race: completion places the order, so the
+    // next CartSession::current() mints the browser a fresh cart.
+    app(CheckoutDriver::class)->complete($session->refresh());
+
+    $this->get(route('lunar.checkout.processing', $session->uuid))
+        ->assertRedirect();
+});
+
+it('still forbids polling a completed session from a browser that never pinned it', function () {
+    app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+    $session->forceFill(['status' => PaymentProcessing::$name])->save();
+    app(CheckoutDriver::class)->complete($session->refresh());
+
+    $this->get(route('lunar.checkout.processing', $session->uuid))
+        ->assertForbidden();
+});

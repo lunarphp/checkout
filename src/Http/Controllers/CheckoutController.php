@@ -29,6 +29,8 @@ use Lunar\Checkout\DataObjects\CheckoutAddress;
 use Lunar\Checkout\DataObjects\CheckoutTheme;
 use Lunar\Checkout\Events\CheckoutElementStored;
 use Lunar\Checkout\Exceptions\AddressLookupException;
+use Lunar\Checkout\Exceptions\CheckoutSessionConflictException;
+use Lunar\Checkout\Exceptions\CheckoutSessionNotOperableException;
 use Lunar\Checkout\Exceptions\PaymentConfirmationException;
 use Lunar\Checkout\Exceptions\RollbackQuote;
 use Lunar\Checkout\Express;
@@ -56,6 +58,9 @@ use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 
 class CheckoutController extends Controller
 {
+    /** Browser-session key listing the checkout sessions this browser pinned for payment. */
+    private const PINNED_SESSIONS_KEY = 'lunar.checkout.pinned';
+
     /**
      * Collaborators are constructor-injected per the service-layer DI rule
      * (spec 0016): the element registry and the address lookup are bound to
@@ -353,6 +358,18 @@ class CheckoutController extends Controller
      */
     private function ensureOwnership(CheckoutSessionModel $session): void
     {
+        /*
+         * The browser that pinned this session for payment owns it through
+         * the gateway round-trip. Checked before CartSession::current(): once
+         * a webhook has placed the order, current() mints the browser a fresh
+         * cart, so the cart id no longer proves anything and the guest's
+         * processing poll would 403 instead of reaching the confirmation.
+         */
+        if (($session->status instanceof PaymentProcessing || $session->status instanceof Completed)
+            && in_array($session->uuid, (array) session()->get(self::PINNED_SESSIONS_KEY, []), true)) {
+            return;
+        }
+
         $cart = CartSession::current();
 
         if ($cart !== null && (string) $cart->id === $session->cart_reference) {
@@ -368,6 +385,19 @@ class CheckoutController extends Controller
             $customerId !== null && (string) $customerId === $session->customer_reference,
             403,
         );
+    }
+
+    /**
+     * Record in the browser session that this browser pinned the checkout
+     * session for payment, so ensureOwnership() still recognises it after a
+     * webhook completes the order. Only the most recent few are kept.
+     */
+    private function rememberPinnedSession(CheckoutSessionModel $session): void
+    {
+        $pinned = array_values(array_diff((array) session()->get(self::PINNED_SESSIONS_KEY, []), [$session->uuid]));
+        $pinned[] = $session->uuid;
+
+        session()->put(self::PINNED_SESSIONS_KEY, array_slice($pinned, -5));
     }
 
     /**
@@ -656,6 +686,21 @@ class CheckoutController extends Controller
         if ($customerId !== null) {
             $checkoutDriver->associateCustomer($session, (string) $customerId, $data['email']);
         } else {
+            /*
+             * Same gate as the driver's operableCart() behind
+             * associateCustomer(): once the session is pinned for payment
+             * the contact email is part of what completion stamps on the
+             * order, so it is frozen (409); a terminal or expired session
+             * is gone (410).
+             */
+            if ($session->status instanceof PaymentProcessing) {
+                throw new CheckoutSessionConflictException('frozen');
+            }
+
+            if (! $session->status instanceof Open || $session->isExpired()) {
+                throw new CheckoutSessionNotOperableException('The checkout session is expired or terminal.');
+            }
+
             $session->customer_email = $data['email'];
             $session->save();
         }
@@ -1163,6 +1208,7 @@ class CheckoutController extends Controller
             }
 
             $checkoutDriver->assertReadyForPayment($session, $data['fingerprint']);
+            $this->rememberPinnedSession($session);
         } catch (PaymentConfirmationException $e) {
             // A stale fingerprint or a Pay pressed before the contact step is
             // routine customer behaviour; every other reason (unorderable
