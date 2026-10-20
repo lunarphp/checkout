@@ -133,6 +133,16 @@ it('replaces an earlier contact email when the customer corrects it', function (
         ->and($cart->billingAddress->contact_email)->toBe('guest@example.com');
 });
 
+it('treats a differently cased earlier contact email as the same one', function () {
+    [$cart, $session] = guestCheckout();
+    $session->forceFill(['customer_email' => 'typo@example.com'])->save();
+    $cart->shippingAddress->update(['contact_email' => ' Typo@Example.com ']);
+
+    $this->post(route('lunar.checkout.contact.store', $session->uuid), ['email' => 'guest@example.com']);
+
+    expect($cart->refresh()->shippingAddress->contact_email)->toBe('guest@example.com');
+});
+
 it('keeps an email an address row carries of its own', function () {
     [$cart, $session] = guestCheckout();
     $cart->shippingAddress->update(['contact_email' => 'site@example.com']);

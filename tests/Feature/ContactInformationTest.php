@@ -129,6 +129,26 @@ it('refuses a guest email change once the session is pinned for payment', functi
     expect($session->fresh()->customer_email)->toBe('paying@example.test');
 });
 
+it('refuses a signed-in email change once the session is pinned for payment', function () {
+    [$user, $customer] = makeUserWithCustomer();
+
+    $cart = routeTestCart();
+    $session = app(CheckoutDriver::class)->createSession($cart);
+    $session->forceFill(['status' => PaymentProcessing::$name, 'customer_email' => 'paying@example.test'])->save();
+    CartSession::use($cart);
+    $this->actingAs($user);
+
+    $this->postJson(route('lunar.checkout.contact.store', $session->uuid), ['email' => 'swapped@example.test'])
+        ->assertStatus(409)
+        ->assertJsonPath('reason', 'frozen');
+
+    $session->refresh();
+
+    expect($session->customer_email)->toBe('paying@example.test')
+        ->and($session->customer_reference)->toBeNull()
+        ->and($cart->refresh()->addresses->pluck('contact_email')->all())->not->toContain('swapped@example.test');
+});
+
 it('refuses a guest email change on a completed session', function () {
     $cart = routeTestCart();
     $session = app(CheckoutDriver::class)->createSession($cart);

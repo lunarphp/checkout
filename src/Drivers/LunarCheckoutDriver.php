@@ -375,7 +375,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
     {
         $cart = $this->operableCart($session);
 
-        $email = is_string($data['email'] ?? null) && trim($data['email']) !== '' ? $data['email'] : null;
+        $email = is_string($data['email'] ?? null) && trim($data['email']) !== '' ? trim($data['email']) : null;
         $previous = $session->customer_email;
 
         foreach ([$cart->shippingAddress, $cart->billingAddress] as $address) {
