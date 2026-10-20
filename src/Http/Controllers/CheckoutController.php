@@ -720,7 +720,7 @@ class CheckoutController extends Controller
         $checkoutDriver->storeContact($session, $data);
 
         if ($customerId !== null) {
-            $checkoutDriver->associateCustomer($session, (string) $customerId, $data['email']);
+            $checkoutDriver->associateCustomer($session, (string) $customerId, trim($data['email']));
         }
 
         return back();
