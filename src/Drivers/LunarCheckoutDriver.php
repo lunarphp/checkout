@@ -360,19 +360,46 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
     |--------------------------------------------------------------------------
     */
 
+    /**
+     * The contact step's email onto the session and onto every cart address
+     * that already exists, so an order created from this cart carries it even
+     * when it is placed before completion runs (the gateway's authorize() on a
+     * webhook-first payment creates the order straight from the cart rows).
+     * Addresses saved later pick it up through withContactEmail().
+     *
+     * A row keeps an email of its own (a wallet sheet's site contact): only
+     * rows with none, or with the email this step gave them last time, follow
+     * a change here.
+     */
     public function storeContact(CheckoutSession $session, array $data): CartSnapshot
     {
         $cart = $this->operableCart($session);
 
-        if ($address = $cart->shippingAddress) {
-            $address->update([
-                'contact_email' => $data['email'] ?? $address->contact_email,
-                'contact_phone' => $data['phone'] ?? $address->contact_phone,
-            ]);
+        $email = is_string($data['email'] ?? null) && trim($data['email']) !== '' ? trim($data['email']) : null;
+        $previous = $session->customer_email;
+
+        foreach ([$cart->shippingAddress, $cart->billingAddress] as $address) {
+            if ($address === null) {
+                continue;
+            }
+
+            $changes = [];
+
+            if ($email !== null && $this->followsContactStep($address->contact_email, $previous)) {
+                $changes['contact_email'] = $email;
+            }
+
+            if ($address->type === 'shipping' && ! empty($data['phone'])) {
+                $changes['contact_phone'] = $data['phone'];
+            }
+
+            if ($changes !== []) {
+                $address->update($changes);
+            }
         }
 
-        if (! empty($data['email'])) {
-            $session->customer_email = $data['email'];
+        if ($email !== null) {
+            $session->customer_email = $email;
             $session->save();
         }
 
@@ -863,6 +890,20 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         }
 
         return $address;
+    }
+
+    /**
+     * Whether an address row's email came from the contact step (or it has
+     * none), so a new contact email should replace it.
+     */
+    private function followsContactStep(?string $rowEmail, ?string $previousContactEmail): bool
+    {
+        if ($rowEmail === null || trim($rowEmail) === '') {
+            return true;
+        }
+
+        return $previousContactEmail !== null
+            && strcasecmp(trim($rowEmail), trim($previousContactEmail)) === 0;
     }
 
     /**
