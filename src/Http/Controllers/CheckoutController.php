@@ -698,8 +698,9 @@ class CheckoutController extends Controller
     }
 
     /**
-     * Persist the contact email. Guest → customer_email on the model; signed-in
-     * → associate the customer (which also stores the email). Order attachment
+     * Persist the contact email through the driver, which also stamps it on
+     * the cart's existing addresses so the order carries it however it is
+     * placed. A signed-in customer is associated as well. Order attachment
      * itself rides on Lunar's cart↔user link, not this value.
      */
     public function storeContact(Request $request, CheckoutSessionModel $session, CheckoutDriver $checkoutDriver): RedirectResponse
@@ -710,15 +711,16 @@ class CheckoutController extends Controller
 
         $customerId = auth()->user()?->latestCustomer()?->id;
 
-        if ($customerId !== null) {
-            $checkoutDriver->associateCustomer($session, (string) $customerId, $data['email']);
-        } else {
+        if ($customerId === null) {
             // Once the session is pinned for payment the contact email is
             // part of what completion stamps on the order.
             $this->ensureWritable($session);
+        }
 
-            $session->customer_email = $data['email'];
-            $session->save();
+        $checkoutDriver->storeContact($session, $data);
+
+        if ($customerId !== null) {
+            $checkoutDriver->associateCustomer($session, (string) $customerId, $data['email']);
         }
 
         return back();
