@@ -2,7 +2,7 @@
 // Run with: npm test
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { analyticsItems, fromMinor, trackCheckoutEvent } from '../../resources/js/utils/analytics.js'
+import { analyticsItems, fromMinor, trackCheckoutEvent, trackCheckoutStart } from '../../resources/js/utils/analytics.js'
 
 const items = [
   { id: 1, sku: 'PUMP-1', title: 'Pump', qty: 2, price: 1299 },
@@ -51,4 +51,35 @@ test('sends nothing without a data layer (no tag manager, or no consent)', () =>
 
   assert.equal(trackCheckoutEvent('add_payment_info', { items, currency: 'GBP', payment_type: 'Card' }), false)
   assert.equal(globalThis.window.dataLayer, undefined)
+})
+
+function storage() {
+  const values = new Map()
+
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+  }
+}
+
+test('sends begin_checkout once per checkout session', () => {
+  globalThis.window = { dataLayer: [], sessionStorage: storage() }
+
+  assert.equal(trackCheckoutStart('session-1', { items, currency: 'GBP' }), true)
+  assert.equal(trackCheckoutStart('session-1', { items, currency: 'GBP' }), false)
+  assert.equal(trackCheckoutStart('session-2', { items, currency: 'GBP' }), true)
+
+  const events = globalThis.window.dataLayer.filter((entry) => entry.event)
+  assert.deepEqual(events.map((entry) => entry.event), ['begin_checkout', 'begin_checkout'])
+  assert.equal(events[0].ecommerce.value, 26.48)
+})
+
+test('does not mark the session begun when nothing could be sent', () => {
+  globalThis.window = { sessionStorage: storage() }
+
+  assert.equal(trackCheckoutStart('session-1', { items, currency: 'GBP' }), false)
+
+  globalThis.window.dataLayer = []
+
+  assert.equal(trackCheckoutStart('session-1', { items, currency: 'GBP' }), true)
 })

@@ -1,5 +1,5 @@
-// GA4 checkout step events (add_shipping_info, add_payment_info) for a store
-// running Google Tag Manager.
+// GA4 checkout events (begin_checkout, add_shipping_info, add_payment_info)
+// for a store running Google Tag Manager.
 //
 // The checkout never loads a tag itself. A host that wants measurement puts
 // its container (and its consent handling) in the head hook,
@@ -54,6 +54,39 @@ export function trackCheckoutEvent(event, { items, currency, ...extra }) {
     event,
     ecommerce: { currency, value: itemsValue(lines), ...extra, items: lines },
   })
+
+  return true
+}
+
+/** Checkout sessions already announced in this tab, so a reload isn't a second start. */
+const BEGUN_KEY = 'lunar_checkout_begun'
+
+/**
+ * begin_checkout, once per checkout session. Sent from the checkout itself
+ * rather than the store's "Checkout" button: the button's request ends in a
+ * full page visit, so the store can't tell it succeeded, and every way in
+ * (basket, Buy Now, a resumed link) lands here.
+ */
+export function trackCheckoutStart(uuid, payload) {
+  if (!uuid) return false
+
+  let begun = []
+
+  try {
+    begun = JSON.parse(window.sessionStorage.getItem(BEGUN_KEY) ?? '[]')
+  } catch {
+    // Storage blocked or corrupt: send it rather than lose the step.
+  }
+
+  if (begun.includes(uuid)) return false
+
+  if (!trackCheckoutEvent('begin_checkout', payload)) return false
+
+  try {
+    window.sessionStorage.setItem(BEGUN_KEY, JSON.stringify([...begun, uuid].slice(-20)))
+  } catch {
+    // As above.
+  }
 
   return true
 }

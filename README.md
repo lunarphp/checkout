@@ -71,8 +71,10 @@ The checkout is its own document, so anything the store needs in its `<head>`
 `resources/views/vendor/lunar-checkout/partials/head.blade.php`. It renders
 last in the head and is empty by default.
 
-The checkout pushes two GA4 step events to `window.dataLayer` when one exists:
+The checkout pushes three GA4 events to `window.dataLayer` when one exists:
 
+- `begin_checkout`, once per checkout session, when it first loads (so the
+  store doesn't send its own from the button that leads here);
 - `add_shipping_info` with `shipping_tier`, when a delivery method or
   collection is chosen (or at pay, if the server chose it);
 - `add_payment_info` with `payment_type`, when the customer pays.

@@ -1,7 +1,7 @@
 import { computed, inject, provide, reactive, watch } from 'vue'
 import { router } from '@inertiajs/vue3'
 import { money } from '../utils/money.js'
-import { trackCheckoutEvent } from '../utils/analytics.js'
+import { trackCheckoutEvent, trackCheckoutStart } from '../utils/analytics.js'
 
 export const CHECKOUT_KEY = Symbol('lunar-checkout')
 
@@ -136,6 +136,9 @@ export function createCheckout(data) {
   })
 
   state.method = state.paymentMethods[0]?.handle ?? null
+
+  // GA4 begin_checkout for a host running Tag Manager, once per session.
+  trackCheckoutStart(data.uuid, { items: state.items, currency: state.currency })
 
   // Bounced back from the processing page: the gateway reported the charge
   // failed and the session was reopened for another attempt.
