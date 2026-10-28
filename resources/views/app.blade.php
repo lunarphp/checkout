@@ -52,6 +52,11 @@
     @if (! empty($page['props']['stylesheet']))
         <link rel="stylesheet" href="{{ $page['props']['stylesheet'] }}">
     @endif
+
+    {{-- The host's head hook (tag manager, consent, verification tags). Empty
+         unless the store publishes resources/views/vendor/lunar-checkout/
+         partials/head.blade.php. --}}
+    @include('lunar-checkout::partials.head')
 </head>
 <body>
     @inertia

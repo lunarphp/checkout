@@ -64,6 +64,22 @@ $this->app->bind(CheckoutTheme::class, fn () =>
 Per-channel theming: bind a closure that resolves the theme from the current
 channel. Same seam.
 
+### Head hook and analytics
+
+The checkout is its own document, so anything the store needs in its `<head>`
+(a tag manager, a consent script, verification meta tags) goes in
+`resources/views/vendor/lunar-checkout/partials/head.blade.php`. It renders
+last in the head and is empty by default.
+
+The checkout pushes two GA4 step events to `window.dataLayer` when one exists:
+
+- `add_shipping_info` with `shipping_tier`, when a delivery method or
+  collection is chosen (or at pay, if the server chose it);
+- `add_payment_info` with `payment_type`, when the customer pays.
+
+Both carry `currency`, `value` and `items`. Nothing is sent without a data
+layer, so create it in the head hook only once the shopper has consented.
+
 ---
 
 ## 4. Tier 2 — Add your own element or gateway (no publish, no rebuild)
