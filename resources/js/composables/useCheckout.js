@@ -379,7 +379,7 @@ export function createCheckout(data) {
   }
 
   function trackPayment(method) {
-    const type = method?.label ?? method?.handle
+    const type = method?.handle
 
     if (!type || trackedPayment.has(type)) return
 

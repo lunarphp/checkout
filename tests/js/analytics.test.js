@@ -49,7 +49,7 @@ test('pushes the event with value, extras and items when a data layer exists', (
 test('sends nothing without a data layer (no tag manager, or no consent)', () => {
   globalThis.window = {}
 
-  assert.equal(trackCheckoutEvent('add_payment_info', { items, currency: 'GBP', payment_type: 'Card' }), false)
+  assert.equal(trackCheckoutEvent('add_payment_info', { items, currency: 'GBP', payment_type: 'card' }), false)
   assert.equal(globalThis.window.dataLayer, undefined)
 })
 

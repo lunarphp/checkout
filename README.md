@@ -77,7 +77,7 @@ The checkout pushes three GA4 events to `window.dataLayer` when one exists:
   store doesn't send its own from the button that leads here);
 - `add_shipping_info` with `shipping_tier`, when a delivery method or
   collection is chosen (or at pay, if the server chose it);
-- `add_payment_info` with `payment_type`, when the customer pays.
+- `add_payment_info` with `payment_type` (the payment method handle, e.g. `card` or `on-account`), when the customer pays.
 
 Both carry `currency`, `value` and `items`. Nothing is sent without a data
 layer, so create it in the head hook only once the shopper has consented.
