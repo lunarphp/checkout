@@ -5,7 +5,8 @@
   "description": "Build toolchain for the self-contained Lunar checkout Inertia app (spec 0008).",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node --test tests/js/*.test.js"
   },
   "dependencies": {
     "@inertiajs/vue3": "^3.0",
