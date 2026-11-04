@@ -567,6 +567,23 @@ it('refunds the captured hold when completion throws for any reason', function (
         ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
 });
 
+it('voids, never refunds, a policy-mode authorisation whose completion throws', function () {
+    Exceptions::fake();
+    $session = mintPinnedStandardSession();
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
+
+    config()->set('lunar.orders.pipelines.creation', [
+        fn () => throw new RuntimeException('order pipeline down'),
+    ]);
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect(FakeHoldGateway::$voidedReferences)->toBe(['pi_fake_pinned'])
+        ->and(FakeHoldGateway::$refundCalls)->toBeEmpty()
+        ->and(FakeHoldGateway::$captureCalls)->toBeEmpty()
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
 it('release reopens a pinned hold session keeping the hold intact', function () {
     $session = mintPinnedHoldSession();
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;

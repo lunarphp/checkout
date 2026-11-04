@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Database\DeadlockException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Exceptions;
 use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
@@ -155,4 +156,36 @@ it('never refunds a session a concurrent completion already placed', function ()
         ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
         ->and($session->refresh()->status)->toBeInstanceOf(Completed::class)
         ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(1);
+});
+
+it('retries a deadlocked completion on a later pass instead of refunding', function () {
+    Exceptions::fake();
+    $session = capturedSession();
+
+    config()->set('lunar.orders.pipelines.creation', [
+        fn () => throw new RuntimeException('SQLSTATE[40001]: Deadlock found when trying to get lock; try restarting transaction'),
+    ]);
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('retry')
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
+        ->and($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(1);
+
+    Exceptions::assertReported(DeadlockException::class);
+});
+
+it('never completes a session reconcile reopened while the async completion ran', function () {
+    $session = capturedSession();
+    $stale = CheckoutSession::query()->findOrFail($session->id);
+
+    // Reconcile refunded and reopened it after this copy was read.
+    $session->forceFill(['status' => Open::$name, 'payment_intent_ref' => null])->save();
+
+    expect(fn () => app(CheckoutDriver::class)->complete($stale))
+        ->toThrow(CheckoutSessionConflictException::class);
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0);
 });

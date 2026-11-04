@@ -330,13 +330,20 @@ for before an order is created:
 3. **Mismatch or failure → the refund invariant.** If the live cart changed during
    the gateway window, or order creation fails (e.g. stock gone under the
    `ValidateCartForOrderCreation` re-check), the money goes back as below. Any
-   exception `complete()` throws
-   counts as a failure, not only a confirmation mismatch: an order build, a
-   placement listener or a database fault that rolls the completion back leaves
-   money with no order, so it is reported and resolves here. The one exception
-   is a session another process already moved out of `PaymentProcessing` (a
-   concurrent completion that won the guarded write): it is re-read first, and
-   a completed session is never refunded.
+   exception `complete()` throws counts as a failure, not only a confirmation
+   mismatch: an order build, a placement listener or a database fault that
+   rolls the completion back leaves money with no order, so it is reported and
+   resolves here. A deadlock or a lost database connection is the exception:
+   it records a reconciliation attempt and retries on a later pass, unless this
+   pass captured a hold, which a retry cannot capture again. Money goes back
+   under the **session row lock**, held until the session is back in `Open`:
+   a concurrent completion either committed first (the session reads
+   `Completed` and nothing is returned) or waits on its guarded write and then
+   finds the session no longer `PaymentProcessing`. The async completion's
+   guarded write accepts only `PaymentProcessing`, and the synchronous one only
+   `Open`, so a session reopened mid-completion is never completed. An
+   authorisation that was never captured (a hold, or a policy-mode
+   `requires_capture` intent) is voided rather than refunded.
    - **Payment not captured** — abort/void the intent via the gateway driver;
      only once the void is **gateway-confirmed** does the session transition
      `→ Open` (re-synced, `CheckoutCompletionFailed`); the customer re-confirms
@@ -588,8 +595,10 @@ states (`Expired`, etc.); the table does not duplicate those.
   completion yields exactly one order; a post-capture mismatch or order-creation
   failure refunds the charge and returns the session to `Open`
   (`CheckoutCompletionFailed`) — no charge survives without an order. Any
-  exception from `complete()` takes the same refund (or hold void) path, except
-  when a re-read shows a concurrent process already completed the session.
+  exception from `complete()` takes the same refund (or void, when nothing was
+  captured) path under the session row lock, except a deadlock or lost
+  connection with no hold captured on that pass, which retries; a session a
+  concurrent completion placed is never refunded.
 - Invalidating a `PaymentProcessing` session voids the intent first; an
   unabortable intent leaves the session in `PaymentProcessing` for §E.2 — never a
   terminal state with an unresolved charge.

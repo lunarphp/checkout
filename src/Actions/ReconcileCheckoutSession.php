@@ -3,6 +3,9 @@
 namespace Lunar\Checkout\Actions;
 
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Database\ConnectionInterface;
+use Illuminate\Database\DetectsConcurrencyErrors;
+use Illuminate\Database\DetectsLostConnections;
 use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
 use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\Events\CheckoutCompletionFailed;
@@ -30,10 +33,14 @@ use Lunar\Core\Exceptions\PaymentIntentException;
  */
 final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 {
+    use DetectsConcurrencyErrors;
+    use DetectsLostConnections;
+
     public function __construct(
         private CheckoutDriver $driver,
         private PaymentIntentGateway $gateways,
         private Dispatcher $events,
+        private ConnectionInterface $db,
     ) {}
 
     public function execute(CheckoutSession $session, ?string $resolve = null): string
@@ -65,7 +72,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             PaymentIntentStatus::Pending => 'pending',
 
             PaymentIntentStatus::Captured,
-            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $reference),
+            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $reference, $status),
 
             PaymentIntentStatus::Voided,
             PaymentIntentStatus::Failed => $this->reopen($session, 'intent_'.$status->value),
@@ -100,7 +107,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 // moved: the customer may keep editing and re-confirm, so
                 // reopen with the hold intact instead of forcing completion.
                 if (! ($session->isHoldMode() && $status === PaymentIntentStatus::RequiresCapture)) {
-                    return $this->completeOrRefund($session, $gateway, $reference);
+                    return $this->completeOrRefund($session, $gateway, $reference, $status);
                 }
             }
         }
@@ -121,14 +128,16 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
     /**
      * Captured money resolves to exactly one of: an order, or money back.
-     * Money back is flavour-aware: an authorise-only hold that was never
-     * captured voids; anything actually captured (a standard intent, or a
-     * hold captured by this very call) refunds.
+     * Money back is flavour-aware: an authorisation that was never captured
+     * (a hold, or a policy-mode requires_capture intent) voids; anything
+     * actually captured (a standard intent, or a hold captured by this very
+     * call) refunds.
      */
     private function completeOrRefund(
         CheckoutSession $session,
         SupportsPaymentIntents $gateway,
         string $reference,
+        PaymentIntentStatus $status,
     ): string {
         // An authorise-only hold is not money moved yet: capture it now, in
         // the one idempotent place every completion path funnels through, so
@@ -164,56 +173,81 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // The cart no longer matches what the customer paid for.
         } catch (\Throwable $e) {
             // Any other failure rolled the completion back and left money
-            // with no order (spec 0010 §E.2), unless a concurrent completion
-            // won the guarded write, whose order the money now belongs to.
-            $session->refresh();
+            // with no order (spec 0010 §E.2). A deadlock or a dropped
+            // connection is retried on a later pass instead, unless this
+            // call captured a hold: a retry cannot capture it again.
+            report($e);
 
-            if ($session->status instanceof Completed) {
+            if (! $holdCaptured && ($this->causedByConcurrencyError($e) || $this->causedByLostConnection($e))) {
+                return $this->recordAttempt($session);
+            }
+        }
+
+        return $this->moneyBack($session, $gateway, $reference, $holdCaptured || $status === PaymentIntentStatus::Captured);
+    }
+
+    /**
+     * Under the session row lock, held until the session is reopened: a
+     * concurrent completion (the webhook) either committed first, and is
+     * seen here, or waits on its guarded write and then finds the session
+     * no longer PaymentProcessing. Money is never returned for an order
+     * that gets placed.
+     */
+    private function moneyBack(
+        CheckoutSession $session,
+        SupportsPaymentIntents $gateway,
+        string $reference,
+        bool $captured,
+    ): string {
+        return $this->db->transaction(function () use ($session, $gateway, $reference, $captured): string {
+            $locked = CheckoutSession::query()->whereKey($session->getKey())->lockForUpdate()->firstOrFail();
+
+            if ($locked->status instanceof Completed) {
                 return 'completed';
             }
 
-            if (! $session->status instanceof PaymentProcessing) {
+            if (! $locked->status instanceof PaymentProcessing) {
                 return 'not-applicable';
             }
 
-            report($e);
-        }
+            // Nothing was captured, so there is nothing to refund: release
+            // the authorisation. A hold-mode session with no capture here
+            // means $gateway lacked SupportsPaymentHolds (a
+            // misconfiguration); voiding is still the safe answer.
+            if (! $captured) {
+                try {
+                    $gateway->voidIntent($reference);
+                } catch (PaymentIntentException) {
+                    $this->events->dispatch(new CheckoutCompletionFailed($session, 'void-failed'));
 
-        // Money back: captured funds refund; an uncaptured hold voids. A
-        // hold-mode session that reaches here with $holdCaptured still false
-        // means $gateway lacked SupportsPaymentHolds (a misconfiguration);
-        // voiding is still the safe answer.
-        if ($session->isHoldMode() && ! $holdCaptured) {
+                    return $this->recordAttempt($session);
+                }
+
+                $holdMode = $session->isHoldMode();
+
+                $this->reopen($session, $holdMode ? 'hold_voided' : 'voided');
+                $this->events->dispatch(new CheckoutCompletionFailed($session, $holdMode ? 'hold-voided' : 'voided'));
+
+                return 'voided';
+            }
+
             try {
-                $gateway->voidIntent($reference);
+                $refund = $gateway->refundIntent(
+                    $reference,
+                    $session->amount_total,
+                    'lunar-checkout-refund:'.$reference,
+                );
             } catch (PaymentIntentException) {
-                $this->events->dispatch(new CheckoutCompletionFailed($session, 'void-failed'));
+                $this->events->dispatch(new CheckoutCompletionFailed($session, 'refund-failed'));
 
                 return $this->recordAttempt($session);
             }
 
-            $this->reopen($session, 'hold_voided');
-            $this->events->dispatch(new CheckoutCompletionFailed($session, 'hold-voided'));
+            $this->reopen($session, 'refunded');
+            $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refund->reference));
 
-            return 'voided';
-        }
-
-        try {
-            $refund = $gateway->refundIntent(
-                $reference,
-                $session->amount_total,
-                'lunar-checkout-refund:'.$reference,
-            );
-        } catch (PaymentIntentException) {
-            $this->events->dispatch(new CheckoutCompletionFailed($session, 'refund-failed'));
-
-            return $this->recordAttempt($session);
-        }
-
-        $this->reopen($session, 'refunded');
-        $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refund->reference));
-
-        return 'refunded';
+            return 'refunded';
+        });
     }
 
     private function resolveByOperator(
