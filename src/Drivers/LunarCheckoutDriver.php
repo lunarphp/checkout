@@ -170,12 +170,16 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
             }
 
             /*
-             * Adopt the order a webhook-first authorize() already placed.
-             * Otherwise createOrder() reuses the cart's draft (the one the pay
-             * gate made) and rebuilds it from the cart just verified: a draft
-             * left by an earlier failed attempt may predate a cart change.
+             * Adopt the order a webhook-first authorize() already placed. The
+             * async path adopts the draft the pay gate built from the cart
+             * whose fingerprint just matched, with no rebuild that could throw
+             * after capture. The sync path had no pin, so createOrder() reuses
+             * any draft an earlier failed attempt left and rebuilds it from
+             * the cart just verified, which may have changed since.
              */
-            $order = $cart->completedOrder ?: $cart->createOrder();
+            $order = $cart->completedOrder
+                ?? ($isSync ? null : $cart->draftOrder)
+                ?? $cart->createOrder();
 
             $this->stampContactEmail($session, $cart, $order);
 

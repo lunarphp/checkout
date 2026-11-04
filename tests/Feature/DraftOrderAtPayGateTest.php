@@ -269,6 +269,23 @@ it('places the drafted order on completion and records the payment on it', funct
         ->and($order->transactions()->where('type', 'capture')->pluck('reference')->all())->toBe([$session->payment_intent_ref]);
 });
 
+it('places the drafted order without rebuilding it once the payment is captured', function () {
+    $session = draftAtPinSession();
+    pressPay($session)->assertSuccessful();
+    $draftId = Order::query()->sole()->id;
+
+    config()->set('lunar.orders.pipelines.creation', [
+        fn () => throw new RuntimeException('order pipeline down'),
+    ]);
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect($session->refresh()->status)->toBeInstanceOf(Completed::class)
+        ->and((string) $session->order_reference)->toBe((string) $draftId)
+        ->and(Order::query()->sole()->placed_at)->not->toBeNull()
+        ->and(DraftAtPinGateway::$refunds)->toBeEmpty();
+});
+
 it('places the drafted order when the webhook arrives before the browser', function () {
     $session = draftAtPinSession();
     pressPay($session)->assertSuccessful();

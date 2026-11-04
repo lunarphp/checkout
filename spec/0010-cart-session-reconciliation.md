@@ -288,6 +288,10 @@ contract is unchanged, the session stores no order id while `PaymentProcessing`
 driver may create its order wherever its backend allows, provided §E.2 holds.
 `createOrder()` reuses the cart's existing draft and rebuilds it in place, so a
 retry never mints a second order and never consumes a discount twice.
+A cart therefore carries at most one draft. A session that pins and is never
+paid leaves that draft behind with `placed_at` null; it is not cleaned up when
+the session expires or is pruned, so anything listing or counting orders MUST
+filter on `placed_at` (core's `Cart::draftOrder()` / `completedOrder()` split).
 
 **Store verbs on the pay path carry the token too.** A client that writes a
 fingerprint input moments before paying (the default flow copies the delivery
@@ -337,10 +341,14 @@ second order, and the synchronous path creates or adopts it inside `complete()`:
    checkout's own writes; the consistent read closes the out-of-band writer.
    Gate 2 (element re-validation + `canCreateOrder`, §E) runs again here on the
    async path.
-2. **Match → place.** Rebuild the cart's draft order from the consistent-read
-   set (`createOrder()` reuses the draft the pin made, or creates one when there
-   is none), record the payment on it, and stamp `placed_at`. An order a
-   webhook-first `authorize()` already placed is adopted as it stands. The
+2. **Match → place.** On the async path, adopt the draft the pin built: the
+   fingerprint match proves it holds what was paid for, and adopting it runs
+   no order build that could fail after capture. Only a session with no draft
+   creates one here. The synchronous path had no pin, so `createOrder()` reuses
+   any draft an earlier failed attempt left and rebuilds it from the
+   consistent-read set. Then record the payment on the order and stamp
+   `placed_at`. An order a webhook-first `authorize()` already placed is
+   adopted as it stands. The
    guarded `→ Completed` write sets `order_reference` **in the same statement**,
    after the order exists. The transition is the same atomic guarded write as §E
    (`WHERE status IN (open, payment_processing)`), which also covers the
