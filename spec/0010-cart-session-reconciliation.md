@@ -329,7 +329,32 @@ for before an order is created:
    **idempotent keyed on the session `uuid`** (create-or-fetch, §B).
 3. **Mismatch or failure → the refund invariant.** If the live cart changed during
    the gateway window, or order creation fails (e.g. stock gone under the
-   `ValidateCartForOrderCreation` re-check):
+   `ValidateCartForOrderCreation` re-check), the money goes back as below. Any
+   exception `complete()` throws counts as a failure, not only a confirmation
+   mismatch: an order build, a placement listener or a database fault that
+   rolls the completion back leaves money with no order, so it is reported and
+   resolves here. A deadlock or a lost database connection is the exception:
+   it records a reconciliation attempt and retries on a later pass (a captured
+   hold survives the retry, because `captureHold()` is idempotent per
+   reference). Money goes back
+   under the **session row lock**, held until the session is back in `Open`:
+   a concurrent completion either committed first (the session reads
+   `Completed` and nothing is returned) or waits on its guarded write and then
+   finds the session no longer `PaymentProcessing`. The async completion's
+   guarded write accepts only `PaymentProcessing`, and the synchronous one only
+   `Open`, so a session reopened mid-completion is never completed. Under the
+   same lock, money stays put when the session was re-pinned against another
+   intent meanwhile, or when the gateway's own `authorize()` placed an order
+   for the cart since the pin (the failure came after placement): that records
+   an attempt and stalls to the operator instead. An attempt is only counted
+   while the session is still `PaymentProcessing`, and before any listener
+   runs. Residual: a gateway that places the order in its own transaction
+   without touching the session row (Stripe's `authorize()` does) can still
+   commit that placement while the refund is in flight, so "never refunded"
+   holds against checkout's own completion, not against every gateway's. `CheckoutCompletionFailed`
+   fires only after the reopen commits. An authorisation that was never
+   captured (a hold, or a policy-mode `requires_capture` intent) is voided
+   rather than refunded.
    - **Payment not captured** — abort/void the intent via the gateway driver;
      only once the void is **gateway-confirmed** does the session transition
      `→ Open` (re-synced, `CheckoutCompletionFailed`); the customer re-confirms
@@ -580,7 +605,12 @@ states (`Expired`, etc.); the table does not duplicate those.
   order-creation transaction; a duplicate callback or double-submitted synchronous
   completion yields exactly one order; a post-capture mismatch or order-creation
   failure refunds the charge and returns the session to `Open`
-  (`CheckoutCompletionFailed`) — no charge survives without an order.
+  (`CheckoutCompletionFailed`) — no charge survives without an order. Any
+  exception from `complete()` takes the same refund (or void, when nothing was
+  captured) path under the session row lock, except a deadlock or lost
+  connection, which retries; a session checkout's own concurrent completion
+  placed is never refunded, and an order the gateway placed since the pin
+  stalls to the operator instead of being refunded.
 - Invalidating a `PaymentProcessing` session voids the intent first; an
   unabortable intent leaves the session in `PaymentProcessing` for §E.2 — never a
   terminal state with an unresolved charge.

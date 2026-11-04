@@ -3,6 +3,8 @@
 namespace Lunar\Checkout\Actions;
 
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Database\DetectsConcurrencyErrors;
+use Illuminate\Database\DetectsLostConnections;
 use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
 use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\Events\CheckoutCompletionFailed;
@@ -11,6 +13,7 @@ use Lunar\Checkout\Events\CheckoutSessionReconciliationStalled;
 use Lunar\Checkout\Exceptions\PaymentConfirmationException;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Checkout\States\CheckoutSession\Cancelled;
+use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PaymentIntentGateway;
@@ -18,6 +21,7 @@ use Lunar\Core\Contracts\SupportsPaymentHolds;
 use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
+use Lunar\Core\Models\Order;
 
 /**
  * Bounded resolution of a `PaymentProcessing` session (spec 0010 §F): the
@@ -29,6 +33,9 @@ use Lunar\Core\Exceptions\PaymentIntentException;
  */
 final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 {
+    use DetectsConcurrencyErrors;
+    use DetectsLostConnections;
+
     public function __construct(
         private CheckoutDriver $driver,
         private PaymentIntentGateway $gateways,
@@ -64,7 +71,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             PaymentIntentStatus::Pending => 'pending',
 
             PaymentIntentStatus::Captured,
-            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $reference),
+            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $reference, $status),
 
             PaymentIntentStatus::Voided,
             PaymentIntentStatus::Failed => $this->reopen($session, 'intent_'.$status->value),
@@ -99,7 +106,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 // moved: the customer may keep editing and re-confirm, so
                 // reopen with the hold intact instead of forcing completion.
                 if (! ($session->isHoldMode() && $status === PaymentIntentStatus::RequiresCapture)) {
-                    return $this->completeOrRefund($session, $gateway, $reference);
+                    return $this->completeOrRefund($session, $gateway, $reference, $status);
                 }
             }
         }
@@ -120,14 +127,16 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
     /**
      * Captured money resolves to exactly one of: an order, or money back.
-     * Money back is flavour-aware: an authorise-only hold that was never
-     * captured voids; anything actually captured (a standard intent, or a
-     * hold captured by this very call) refunds.
+     * Money back is flavour-aware: an authorisation that was never captured
+     * (a hold, or a policy-mode requires_capture intent) voids; anything
+     * actually captured (a standard intent, or a hold captured by this very
+     * call) refunds.
      */
     private function completeOrRefund(
         CheckoutSession $session,
         SupportsPaymentIntents $gateway,
         string $reference,
+        PaymentIntentStatus $status,
     ): string {
         // An authorise-only hold is not money moved yet: capture it now, in
         // the one idempotent place every completion path funnels through, so
@@ -161,43 +170,107 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             return 'completed';
         } catch (PaymentConfirmationException) {
             // The cart no longer matches what the customer paid for.
-        }
+        } catch (\Throwable $e) {
+            // Any other failure rolled the completion back and left money
+            // with no order (spec 0010 §E.2). A deadlock or a dropped
+            // connection is retried on a later pass instead; captureHold()
+            // is idempotent per reference, so a captured hold survives that.
+            report($e);
 
-        // Money back: captured funds refund; an uncaptured hold voids. A
-        // hold-mode session that reaches here with $holdCaptured still false
-        // means $gateway lacked SupportsPaymentHolds (a misconfiguration);
-        // voiding is still the safe answer.
-        if ($session->isHoldMode() && ! $holdCaptured) {
-            try {
-                $gateway->voidIntent($reference);
-            } catch (PaymentIntentException) {
-                $this->events->dispatch(new CheckoutCompletionFailed($session, 'void-failed'));
-
+            if ($this->causedByConcurrencyError($e) || $this->causedByLostConnection($e)) {
                 return $this->recordAttempt($session);
             }
-
-            $this->reopen($session, 'hold_voided');
-            $this->events->dispatch(new CheckoutCompletionFailed($session, 'hold-voided'));
-
-            return 'voided';
         }
 
-        try {
-            $refund = $gateway->refundIntent(
-                $reference,
-                $session->amount_total,
-                'lunar-checkout-refund:'.$reference,
-            );
-        } catch (PaymentIntentException) {
-            $this->events->dispatch(new CheckoutCompletionFailed($session, 'refund-failed'));
+        return $this->moneyBack($session, $gateway, $reference, $holdCaptured || $status === PaymentIntentStatus::Captured);
+    }
 
-            return $this->recordAttempt($session);
+    /**
+     * Under the session row lock, held until the session is reopened: a
+     * concurrent completion (the webhook) either committed first, and is
+     * seen here, or waits on its guarded write and then finds the session
+     * no longer PaymentProcessing. Events fire only after the reopen commits,
+     * so a throwing listener cannot roll back a reopen whose money has
+     * already gone back.
+     */
+    private function moneyBack(
+        CheckoutSession $session,
+        SupportsPaymentIntents $gateway,
+        string $reference,
+        bool $captured,
+    ): string {
+        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $reference, $captured): array {
+            $locked = CheckoutSession::query()->whereKey($session->getKey())->lockForUpdate()->firstOrFail();
+
+            if ($locked->status instanceof Completed) {
+                return ['completed', null];
+            }
+
+            // Another process reopened it, or reopened and re-pinned it
+            // against a new intent: this pass's money decision is stale.
+            if (! $locked->status instanceof PaymentProcessing || $locked->payment_intent_ref !== $reference) {
+                return ['not-applicable', null];
+            }
+
+            // The gateway's own authorize() placed an order for this cart
+            // since the pin, before complete() failed: returning the money
+            // would leave a placed order unpaid. The operator resolves it.
+            // An order an earlier checkout of the same cart placed does not
+            // count.
+            $placedForThisPayment = Order::query()
+                ->where('cart_id', (int) $session->cart_reference)
+                ->whereNotNull('placed_at')
+                ->when($locked->payment_processing_at, fn ($query, $pinnedAt) => $query->where('placed_at', '>=', $pinnedAt))
+                ->exists();
+
+            if ($placedForThisPayment) {
+                return ['order-placed', null];
+            }
+
+            // Nothing was captured, so there is nothing to refund: release
+            // the authorisation. A hold-mode session with no capture here
+            // means $gateway lacked SupportsPaymentHolds (a
+            // misconfiguration); voiding is still the safe answer.
+            if (! $captured) {
+                try {
+                    $gateway->voidIntent($reference);
+                } catch (PaymentIntentException) {
+                    return ['void-failed', new CheckoutCompletionFailed($session, 'void-failed')];
+                }
+
+                $holdMode = $session->isHoldMode();
+                $this->reopen($session, 'voided');
+
+                return ['voided', new CheckoutCompletionFailed($session, $holdMode ? 'hold-voided' : 'voided')];
+            }
+
+            try {
+                $refund = $gateway->refundIntent(
+                    $reference,
+                    $session->amount_total,
+                    'lunar-checkout-refund:'.$reference,
+                );
+            } catch (PaymentIntentException) {
+                return ['refund-failed', new CheckoutCompletionFailed($session, 'refund-failed')];
+            }
+
+            $this->reopen($session, 'refunded');
+
+            return ['refunded', new CheckoutCompletionFailed($session, 'refunded', $refund->reference)];
+        });
+
+        // Count the attempt before any listener runs, so a throwing
+        // listener cannot stop the session reaching its stall.
+        $result = match ($outcome) {
+            'void-failed', 'refund-failed', 'order-placed' => $this->recordAttempt($session),
+            default => $outcome,
+        };
+
+        if ($event !== null) {
+            $this->events->dispatch($event);
         }
 
-        $this->reopen($session, 'refunded');
-        $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refund->reference));
-
-        return 'refunded';
+        return $result;
     }
 
     private function resolveByOperator(
@@ -301,8 +374,18 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
     {
         $maxAttempts = (int) config('lunar.checkout.reconciliation.max_attempts', 5);
 
-        $session->increment('reconciliation_attempts');
+        // Only a session still awaiting resolution counts an attempt: one a
+        // concurrent completion or reopen moved on must not raise a stall.
+        $counted = CheckoutSession::query()
+            ->whereKey($session->getKey())
+            ->where('status', PaymentProcessing::$name)
+            ->increment('reconciliation_attempts');
+
         $session->refresh();
+
+        if ($counted === 0) {
+            return 'not-applicable';
+        }
 
         if ($session->reconciliation_attempts < $maxAttempts) {
             return 'retry';

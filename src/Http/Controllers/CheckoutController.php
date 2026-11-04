@@ -1275,7 +1275,7 @@ class CheckoutController extends Controller
 
         return response()->json([
             'outcome' => $outcome,
-            'released' => in_array($outcome, ['released', 'refunded'], true),
+            'released' => in_array($outcome, ['released', 'refunded', 'voided'], true),
             // The retry pins against the live fingerprint, so hand it over.
             'fingerprint' => $checkoutDriver->fingerprint($session),
         ]);
