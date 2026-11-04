@@ -352,3 +352,37 @@ it('places the refreshed draft when the retry after a refund pays synchronously'
         ->and(orderedQuantity($order))->toBe(2)
         ->and((int) $order->total)->toBe((int) sessionCart($session)->calculate()->total->value);
 });
+
+it('rebuilds a stale draft when a payment arrives on a session pinned without the gate', function () {
+    Event::fake([CheckoutCompletionFailed::class]);
+
+    $session = draftAtPinSession();
+    pressPay($session)->assertSuccessful();
+    $draftId = Order::query()->sole()->id;
+
+    doubleTheQuantity($session);
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+
+    // The gateway took payment with no Pay step: the session is pinned
+    // against the live cart the way the webhook listener pins it, and the
+    // draft still holds the cart from the first attempt.
+    $session->forceFill([
+        'status' => PaymentProcessing::$name,
+        'payment_intent_ref' => 'pi_without_pay',
+        'payment_processing_at' => now(),
+        'cart_fingerprint' => CheckoutCart::fingerprint($session),
+        'amount_total' => sessionCart($session)->calculate()->total->value,
+    ])->save();
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    $order = Order::query()->sole();
+
+    expect($session->refresh()->status)->toBeInstanceOf(Completed::class)
+        ->and($order->id)->toBe($draftId)
+        ->and($order->placed_at)->not->toBeNull()
+        ->and(orderedQuantity($order))->toBe(2)
+        ->and((int) $order->total)->toBe((int) $session->amount_total);
+});

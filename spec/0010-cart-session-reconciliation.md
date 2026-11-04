@@ -341,14 +341,18 @@ second order, and the synchronous path creates or adopts it inside `complete()`:
    checkout's own writes; the consistent read closes the out-of-band writer.
    Gate 2 (element re-validation + `canCreateOrder`, §E) runs again here on the
    async path.
-2. **Match → place.** On the async path, adopt the draft the pin built: the
-   fingerprint match proves it holds what was paid for, and adopting it runs
-   no order build that could fail after capture. Only a session with no draft
-   creates one here. The synchronous path had no pin, so `createOrder()` reuses
-   any draft an earlier failed attempt left and rebuilds it from the
-   consistent-read set. Then record the payment on the order and stamp
-   `placed_at`. An order a webhook-first `authorize()` already placed is
-   adopted as it stands. The
+2. **Match → place.** Adopt the cart's draft as built only when the pin
+   stamped it (`meta.checkout_fingerprint`) with exactly the fingerprint just
+   verified: then it holds what was paid for, and no order build runs after
+   capture. Any other draft (one an earlier failed attempt left, or one a
+   session pinned without the gate never refreshed, such as a payment the
+   gateway confirmed with no Pay step) is rebuilt by `createOrder()` from the
+   consistent-read set, which also creates the order when there is none. Then
+   record the payment on the order and stamp `placed_at`. An order a
+   webhook-first `authorize()` already placed is adopted as it stands. A
+   gateway's own `authorize()` that reads `$cart->draftOrder` directly (core
+   Stripe does) is outside this check: a payment confirmed with no Pay after a
+   cart change meets the stale draft there, and fixing that belongs in core. The
    guarded `→ Completed` write sets `order_reference` **in the same statement**,
    after the order exists. The transition is the same atomic guarded write as §E
    (`WHERE status IN (open, payment_processing)`), which also covers the

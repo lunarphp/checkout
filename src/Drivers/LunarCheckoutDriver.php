@@ -170,15 +170,17 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
             }
 
             /*
-             * Adopt the order a webhook-first authorize() already placed. The
-             * async path adopts the draft the pay gate built from the cart
-             * whose fingerprint just matched, with no rebuild that could throw
-             * after capture. The sync path had no pin, so createOrder() reuses
-             * any draft an earlier failed attempt left and rebuilds it from
-             * the cart just verified, which may have changed since.
+             * Adopt the order a webhook-first authorize() already placed.
+             * Otherwise adopt the draft as built only when the pay gate built
+             * it from exactly the cart just verified, so no rebuild runs after
+             * capture. Any other draft (one an earlier failed attempt left, or
+             * one a session pinned without the gate never refreshed) predates
+             * a cart change: createOrder() reuses it and rebuilds it here.
              */
+            $draft = $cart->draftOrder;
+
             $order = $cart->completedOrder
-                ?? ($isSync ? null : $cart->draftOrder)
+                ?? ($draft !== null && ($draft->meta['checkout_fingerprint'] ?? null) === $live->fingerprint ? $draft : null)
                 ?? $cart->createOrder();
 
             $this->stampContactEmail($session, $cart, $order);
@@ -374,8 +376,10 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
             }
 
             // Reuses the draft a failed or refunded earlier attempt left
-            // behind, refreshed from this cart (spec 0010 §E).
-            $cart->createOrder();
+            // behind, refreshed from this cart (spec 0010 §E). The stamp is
+            // what completion checks before adopting the draft unrebuilt.
+            $draft = $cart->createOrder();
+            $draft->update(['meta' => array_merge((array) $draft->meta, ['checkout_fingerprint' => $live->fingerprint])]);
         });
 
         $session->refresh();
