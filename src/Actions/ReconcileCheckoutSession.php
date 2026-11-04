@@ -173,11 +173,11 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         } catch (\Throwable $e) {
             // Any other failure rolled the completion back and left money
             // with no order (spec 0010 §E.2). A deadlock or a dropped
-            // connection is retried on a later pass instead, unless this
-            // call captured a hold: a retry cannot capture it again.
+            // connection is retried on a later pass instead; captureHold()
+            // is idempotent per reference, so a captured hold survives that.
             report($e);
 
-            if (! $holdCaptured && ($this->causedByConcurrencyError($e) || $this->causedByLostConnection($e))) {
+            if ($this->causedByConcurrencyError($e) || $this->causedByLostConnection($e)) {
                 return $this->recordAttempt($session);
             }
         }
@@ -213,9 +213,17 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             }
 
             // The gateway's own authorize() placed an order for this cart
-            // before complete() failed: returning the money would leave a
-            // placed order unpaid. The operator resolves it.
-            if (Order::query()->where('cart_id', (int) $session->cart_reference)->whereNotNull('placed_at')->exists()) {
+            // since the pin, before complete() failed: returning the money
+            // would leave a placed order unpaid. The operator resolves it.
+            // An order an earlier checkout of the same cart placed does not
+            // count.
+            $placedForThisPayment = Order::query()
+                ->where('cart_id', (int) $session->cart_reference)
+                ->whereNotNull('placed_at')
+                ->when($locked->payment_processing_at, fn ($query, $pinnedAt) => $query->where('placed_at', '>=', $pinnedAt))
+                ->exists();
+
+            if ($placedForThisPayment) {
                 return ['order-placed', null];
             }
 
@@ -251,14 +259,18 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             return ['refunded', new CheckoutCompletionFailed($session, 'refunded', $refund->reference)];
         });
 
+        // Count the attempt before any listener runs, so a throwing
+        // listener cannot stop the session reaching its stall.
+        $result = match ($outcome) {
+            'void-failed', 'refund-failed', 'order-placed' => $this->recordAttempt($session),
+            default => $outcome,
+        };
+
         if ($event !== null) {
             $this->events->dispatch($event);
         }
 
-        return match ($outcome) {
-            'void-failed', 'refund-failed', 'order-placed' => $this->recordAttempt($session),
-            default => $outcome,
-        };
+        return $result;
     }
 
     private function resolveByOperator(
@@ -362,8 +374,18 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
     {
         $maxAttempts = (int) config('lunar.checkout.reconciliation.max_attempts', 5);
 
-        $session->increment('reconciliation_attempts');
+        // Only a session still awaiting resolution counts an attempt: one a
+        // concurrent completion or reopen moved on must not raise a stall.
+        $counted = CheckoutSession::query()
+            ->whereKey($session->getKey())
+            ->where('status', PaymentProcessing::$name)
+            ->increment('reconciliation_attempts');
+
         $session->refresh();
+
+        if ($counted === 0) {
+            return 'not-applicable';
+        }
 
         if ($session->reconciliation_attempts < $maxAttempts) {
             return 'retry';

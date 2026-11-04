@@ -20,6 +20,7 @@ use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
 use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
@@ -35,6 +36,8 @@ class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentInte
     /** @var array<int, array{reference: string, amount: int}> */
     public static array $refunds = [];
 
+    public static bool $refundFails = false;
+
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
         return new PaymentIntentDescriptor('pi_captured_'.$cart->id);
@@ -49,6 +52,10 @@ class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentInte
 
     public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
     {
+        if (static::$refundFails) {
+            throw new PaymentIntentException('gateway refund failed');
+        }
+
         static::$refunds[] = ['reference' => $reference, 'amount' => $amountMinor];
 
         return new PaymentRefund(success: true, reference: 'refund_'.$reference);
@@ -85,6 +92,7 @@ class CapturedIntentMethod extends AbstractPaymentMethod
 
 beforeEach(function () {
     CapturedIntentGateway::$refunds = [];
+    CapturedIntentGateway::$refundFails = false;
 
     Payments::extend('captured-intent', fn () => app(CapturedIntentGateway::class));
     app(PaymentMethodRegistry::class)->add(CapturedIntentMethod::class);
@@ -243,4 +251,31 @@ it('leaves a session alone that was re-pinned against a new intent meanwhile', f
     expect($outcome)->toBe('not-applicable')
         ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
         ->and($session->refresh()->payment_intent_ref)->toBe('pi_newer');
+});
+
+it('still refunds when the only placed order on the cart predates this payment', function () {
+    $session = capturedSession();
+    Cart::query()->findOrFail((int) $session->cart_reference)->createOrder()->update(['placed_at' => now()->subDay()]);
+    $session->forceFill(['cart_fingerprint' => 'stale'])->save();
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session->refresh());
+
+    expect($outcome)->toBe('refunded')
+        ->and(CapturedIntentGateway::$refunds)->toHaveCount(1)
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('counts the attempt even when a listener throws on a failed refund', function () {
+    Exceptions::fake();
+    CapturedIntentGateway::$refundFails = true;
+    $session = capturedSession();
+    $session->forceFill(['cart_fingerprint' => 'stale'])->save();
+
+    Event::listen(CheckoutCompletionFailed::class, fn () => throw new LogicException('listener down'));
+
+    expect(fn () => app(ReconcilesCheckoutSession::class)->execute($session->refresh()))
+        ->toThrow(LogicException::class, 'listener down');
+
+    expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(1);
 });
