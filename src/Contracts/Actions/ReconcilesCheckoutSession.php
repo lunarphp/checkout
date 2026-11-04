@@ -26,7 +26,7 @@ interface ReconcilesCheckoutSession
      * unconfirmable outcome stays frozen for the reconciliation sweep.
      *
      * Returns a stable outcome code: `released`, `completed`, `refunded`,
-     * `unconfirmed` or `not-applicable`.
+     * `voided`, `unconfirmed` or `not-applicable`.
      */
     public function release(CheckoutSession $session): string;
 }

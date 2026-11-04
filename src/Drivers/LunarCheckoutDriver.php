@@ -228,8 +228,11 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
              * the first. All of it sits in one transaction under the cart lock,
              * so nothing observes the session completed without its order.
              */
+            // Each path completes only from the status it verified: a session
+            // that reconcile reopened (refunded) while this ran must not be
+            // completed by the async path that read it PaymentProcessing.
             $transitioned = $session->transitionGuarded(
-                [Open::$name, PaymentProcessing::$name],
+                [$isSync ? Open::$name : PaymentProcessing::$name],
                 Completed::$name,
                 $attributes,
             );
