@@ -341,9 +341,14 @@ for before an order is created:
    `Completed` and nothing is returned) or waits on its guarded write and then
    finds the session no longer `PaymentProcessing`. The async completion's
    guarded write accepts only `PaymentProcessing`, and the synchronous one only
-   `Open`, so a session reopened mid-completion is never completed. An
-   authorisation that was never captured (a hold, or a policy-mode
-   `requires_capture` intent) is voided rather than refunded.
+   `Open`, so a session reopened mid-completion is never completed. Under the
+   same lock, money stays put when the session was re-pinned against another
+   intent meanwhile, or when the gateway's own `authorize()` already placed an
+   order for the cart (the failure came after placement): that records an
+   attempt and stalls to the operator instead. `CheckoutCompletionFailed`
+   fires only after the reopen commits. An authorisation that was never
+   captured (a hold, or a policy-mode `requires_capture` intent) is voided
+   rather than refunded.
    - **Payment not captured** — abort/void the intent via the gateway driver;
      only once the void is **gateway-confirmed** does the session transition
      `→ Open` (re-synced, `CheckoutCompletionFailed`); the customer re-confirms

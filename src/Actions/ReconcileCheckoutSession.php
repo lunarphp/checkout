@@ -3,7 +3,6 @@
 namespace Lunar\Checkout\Actions;
 
 use Illuminate\Contracts\Events\Dispatcher;
-use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\DetectsConcurrencyErrors;
 use Illuminate\Database\DetectsLostConnections;
 use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
@@ -22,6 +21,7 @@ use Lunar\Core\Contracts\SupportsPaymentHolds;
 use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
+use Lunar\Core\Models\Order;
 
 /**
  * Bounded resolution of a `PaymentProcessing` session (spec 0010 §F): the
@@ -40,7 +40,6 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         private CheckoutDriver $driver,
         private PaymentIntentGateway $gateways,
         private Dispatcher $events,
-        private ConnectionInterface $db,
     ) {}
 
     public function execute(CheckoutSession $session, ?string $resolve = null): string
@@ -190,8 +189,9 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      * Under the session row lock, held until the session is reopened: a
      * concurrent completion (the webhook) either committed first, and is
      * seen here, or waits on its guarded write and then finds the session
-     * no longer PaymentProcessing. Money is never returned for an order
-     * that gets placed.
+     * no longer PaymentProcessing. Events fire only after the reopen commits,
+     * so a throwing listener cannot roll back a reopen whose money has
+     * already gone back.
      */
     private function moneyBack(
         CheckoutSession $session,
@@ -199,15 +199,24 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         string $reference,
         bool $captured,
     ): string {
-        return $this->db->transaction(function () use ($session, $gateway, $reference, $captured): string {
+        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $reference, $captured): array {
             $locked = CheckoutSession::query()->whereKey($session->getKey())->lockForUpdate()->firstOrFail();
 
             if ($locked->status instanceof Completed) {
-                return 'completed';
+                return ['completed', null];
             }
 
-            if (! $locked->status instanceof PaymentProcessing) {
-                return 'not-applicable';
+            // Another process reopened it, or reopened and re-pinned it
+            // against a new intent: this pass's money decision is stale.
+            if (! $locked->status instanceof PaymentProcessing || $locked->payment_intent_ref !== $reference) {
+                return ['not-applicable', null];
+            }
+
+            // The gateway's own authorize() placed an order for this cart
+            // before complete() failed: returning the money would leave a
+            // placed order unpaid. The operator resolves it.
+            if (Order::query()->where('cart_id', (int) $session->cart_reference)->whereNotNull('placed_at')->exists()) {
+                return ['order-placed', null];
             }
 
             // Nothing was captured, so there is nothing to refund: release
@@ -218,17 +227,13 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 try {
                     $gateway->voidIntent($reference);
                 } catch (PaymentIntentException) {
-                    $this->events->dispatch(new CheckoutCompletionFailed($session, 'void-failed'));
-
-                    return $this->recordAttempt($session);
+                    return ['void-failed', new CheckoutCompletionFailed($session, 'void-failed')];
                 }
 
                 $holdMode = $session->isHoldMode();
+                $this->reopen($session, 'voided');
 
-                $this->reopen($session, $holdMode ? 'hold_voided' : 'voided');
-                $this->events->dispatch(new CheckoutCompletionFailed($session, $holdMode ? 'hold-voided' : 'voided'));
-
-                return 'voided';
+                return ['voided', new CheckoutCompletionFailed($session, $holdMode ? 'hold-voided' : 'voided')];
             }
 
             try {
@@ -238,16 +243,22 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                     'lunar-checkout-refund:'.$reference,
                 );
             } catch (PaymentIntentException) {
-                $this->events->dispatch(new CheckoutCompletionFailed($session, 'refund-failed'));
-
-                return $this->recordAttempt($session);
+                return ['refund-failed', new CheckoutCompletionFailed($session, 'refund-failed')];
             }
 
             $this->reopen($session, 'refunded');
-            $this->events->dispatch(new CheckoutCompletionFailed($session, 'refunded', $refund->reference));
 
-            return 'refunded';
+            return ['refunded', new CheckoutCompletionFailed($session, 'refunded', $refund->reference)];
         });
+
+        if ($event !== null) {
+            $this->events->dispatch($event);
+        }
+
+        return match ($outcome) {
+            'void-failed', 'refund-failed', 'order-placed' => $this->recordAttempt($session),
+            default => $outcome,
+        };
     }
 
     private function resolveByOperator(

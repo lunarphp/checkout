@@ -2,10 +2,13 @@
 
 use Illuminate\Database\DeadlockException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
 use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
 use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\Contracts\PaymentMethodRegistry;
+use Lunar\Checkout\Events\CheckoutCompletionFailed;
+use Lunar\Checkout\Events\OrderPlacing;
 use Lunar\Checkout\Exceptions\CheckoutSessionConflictException;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Checkout\PaymentMethods\AbstractPaymentMethod;
@@ -188,4 +191,56 @@ it('never completes a session reconcile reopened while the async completion ran'
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class)
         ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0);
+});
+
+it('keeps the session reopened when a listener throws after the refund', function () {
+    Exceptions::fake();
+    $session = capturedSession();
+
+    config()->set('lunar.orders.pipelines.creation', [
+        fn () => throw new RuntimeException('order pipeline down'),
+    ]);
+    Event::listen(CheckoutCompletionFailed::class, fn () => throw new LogicException('listener down'));
+
+    expect(fn () => app(ReconcilesCheckoutSession::class)->execute($session))
+        ->toThrow(LogicException::class, 'listener down');
+
+    expect(CapturedIntentGateway::$refunds)->toHaveCount(1)
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBeNull();
+});
+
+it('never refunds money whose order the gateway already placed', function () {
+    Exceptions::fake();
+    $session = capturedSession();
+    Cart::query()->findOrFail((int) $session->cart_reference)->createOrder()->update(['placed_at' => now()]);
+
+    Event::listen(OrderPlacing::class, fn () => throw new LogicException('placement vetoed'));
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('retry')
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
+        ->and($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(1);
+});
+
+it('leaves a session alone that was re-pinned against a new intent meanwhile', function () {
+    Exceptions::fake();
+    $session = capturedSession();
+
+    $real = app(CheckoutDriver::class);
+    $proxy = Mockery::mock($real)->makePartial();
+    $proxy->shouldReceive('complete')->andReturnUsing(function (CheckoutSession $s) {
+        CheckoutSession::query()->whereKey($s->id)->update(['payment_intent_ref' => 'pi_newer']);
+
+        throw new RuntimeException('order pipeline down');
+    });
+    app()->instance(CheckoutDriver::class, $proxy);
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('not-applicable')
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
+        ->and($session->refresh()->payment_intent_ref)->toBe('pi_newer');
 });
