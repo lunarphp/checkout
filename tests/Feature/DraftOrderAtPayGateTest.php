@@ -386,3 +386,21 @@ it('rebuilds a stale draft when a payment arrives on a session pinned without th
         ->and(orderedQuantity($order))->toBe(2)
         ->and((int) $order->total)->toBe((int) $session->amount_total);
 });
+
+it('throttles Pay so abandoned attempts cannot cheaply exhaust a limited coupon', function () {
+    $session = draftAtPinSession();
+
+    foreach (range(1, 10) as $attempt) {
+        $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+            'fingerprint' => 'stale',
+            'payment_method' => 'draft-card',
+        ])->assertUnprocessable();
+    }
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'fingerprint' => CheckoutCart::fingerprint($session),
+        'payment_method' => 'draft-card',
+    ])->assertTooManyRequests();
+
+    expect(Order::query()->count())->toBe(0);
+});

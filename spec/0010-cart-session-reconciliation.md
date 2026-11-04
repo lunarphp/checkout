@@ -288,6 +288,12 @@ contract is unchanged, the session stores no order id while `PaymentProcessing`
 driver may create its order wherever its backend allows, provided §E.2 holds.
 `createOrder()` reuses the cart's existing draft and rebuilds it in place, so a
 retry never mints a second order and never consumes a discount twice.
+Drafting does consume a use of each discount on the cart (core's
+`markAsUsed()`), so an abandoned Pay spends a limited coupon's use and nothing
+gives it back. That is an accepted trade-off; the Pay route is throttled
+(`checkout-pay`: 10 a minute and 30 an hour per IP) so it cannot be exhausted
+cheaply on purpose, and counting the use at placement instead is a core
+follow-up.
 A cart therefore carries at most one draft. A session that pins and is never
 paid leaves that draft behind with `placed_at` null; it is not cleaned up when
 the session expires or is pruned, so anything listing or counting orders MUST

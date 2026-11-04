@@ -88,6 +88,7 @@ Route::middleware(config('lunar.checkout.middleware', ['web']))
         // fingerprint of the state the customer confirmed. The gateway's
         // client-side confirmation happens after this returns.
         Route::post($path.'/{session}/pay', [CheckoutController::class, 'pay'])
+            ->middleware('throttle:checkout-pay')
             ->name('lunar.checkout.pay');
 
         // Customer-initiated unpin after a failed/abandoned gateway

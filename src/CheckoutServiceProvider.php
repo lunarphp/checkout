@@ -150,6 +150,15 @@ class CheckoutServiceProvider extends ServiceProvider
         // other lookups rather than left open to abuse.
         RateLimiter::for('checkout-shipping-quote', fn (Request $request): Limit => Limit::perMinute(10)->by($request->ip()));
 
+        // Pay drafts the order, and drafting consumes a use of any limited
+        // coupon on the cart (spec 0010 section E). Throttled so pressing Pay
+        // and abandoning across fresh carts cannot cheaply exhaust a
+        // promotion; a real customer retries a handful of times at most.
+        RateLimiter::for('checkout-pay', fn (Request $request): array => [
+            Limit::perMinute(10)->by('minute:'.$request->ip()),
+            Limit::perHour(30)->by('hour:'.$request->ip()),
+        ]);
+
         $this->mergeConfigFrom(__DIR__.'/../config/checkout.php', 'lunar.checkout');
 
         // Spec 0013 §C: the chosen pickup point rides on the collect
