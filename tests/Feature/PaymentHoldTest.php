@@ -2,6 +2,7 @@
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Exceptions;
 use Lunar\Checkout\Contracts\PaymentMethodRegistry;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Checkout\PaymentMethods\AbstractPaymentMethod;
@@ -547,6 +548,23 @@ it('refunds, never voids, when completion fails after the hold was already captu
         ->and(FakeHoldGateway::$voidedReferences)->toBeEmpty();
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('refunds the captured hold when completion throws for any reason', function () {
+    Exceptions::fake();
+    $session = mintPinnedHoldSession();
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
+
+    config()->set('lunar.orders.pipelines.creation', [
+        fn () => throw new RuntimeException('order pipeline down'),
+    ]);
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect(FakeHoldGateway::$captureCalls)->toHaveCount(1)
+        ->and(FakeHoldGateway::$refundCalls)->toHaveCount(1)
+        ->and(FakeHoldGateway::$voidedReferences)->toBeEmpty()
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
 });
 
 it('release reopens a pinned hold session keeping the hold intact', function () {

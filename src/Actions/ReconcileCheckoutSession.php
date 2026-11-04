@@ -11,6 +11,7 @@ use Lunar\Checkout\Events\CheckoutSessionReconciliationStalled;
 use Lunar\Checkout\Exceptions\PaymentConfirmationException;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Checkout\States\CheckoutSession\Cancelled;
+use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PaymentIntentGateway;
@@ -161,6 +162,21 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             return 'completed';
         } catch (PaymentConfirmationException) {
             // The cart no longer matches what the customer paid for.
+        } catch (\Throwable $e) {
+            // Any other failure rolled the completion back and left money
+            // with no order (spec 0010 §E.2), unless a concurrent completion
+            // won the guarded write, whose order the money now belongs to.
+            $session->refresh();
+
+            if ($session->status instanceof Completed) {
+                return 'completed';
+            }
+
+            if (! $session->status instanceof PaymentProcessing) {
+                return 'not-applicable';
+            }
+
+            report($e);
         }
 
         // Money back: captured funds refund; an uncaptured hold voids. A

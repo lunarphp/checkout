@@ -1,0 +1,158 @@
+<?php
+
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Exceptions;
+use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
+use Lunar\Checkout\Contracts\CheckoutDriver;
+use Lunar\Checkout\Contracts\PaymentMethodRegistry;
+use Lunar\Checkout\Exceptions\CheckoutSessionConflictException;
+use Lunar\Checkout\Models\CheckoutSession;
+use Lunar\Checkout\PaymentMethods\AbstractPaymentMethod;
+use Lunar\Checkout\States\CheckoutSession\Completed;
+use Lunar\Checkout\States\CheckoutSession\Open;
+use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
+use Lunar\Core\Contracts\CreatesPaymentIntents;
+use Lunar\Core\Contracts\SupportsPaymentIntents;
+use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentRefund;
+use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Facades\CartSession;
+use Lunar\Core\Facades\Payments;
+use Lunar\Core\Models\Cart;
+use Lunar\Core\Models\Order;
+use Lunar\Core\PaymentTypes\OfflinePayment;
+use Lunar\Tests\Checkout\TestCase;
+use Lunar\Tests\Checkout\Utils\CheckoutCart;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentIntents, SupportsPaymentIntents
+{
+    /** @var array<int, array{reference: string, amount: int}> */
+    public static array $refunds = [];
+
+    public function createIntent(Cart $cart): PaymentIntentDescriptor
+    {
+        return new PaymentIntentDescriptor('pi_captured_'.$cart->id);
+    }
+
+    public function fetchIntent(string $reference): PaymentIntentStatus
+    {
+        return PaymentIntentStatus::Captured;
+    }
+
+    public function voidIntent(string $reference): void {}
+
+    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    {
+        static::$refunds[] = ['reference' => $reference, 'amount' => $amountMinor];
+
+        return new PaymentRefund(success: true, reference: 'refund_'.$reference);
+    }
+}
+
+class CapturedIntentMethod extends AbstractPaymentMethod
+{
+    public function handle(): string
+    {
+        return 'captured-card';
+    }
+
+    public function label(): string
+    {
+        return 'Card';
+    }
+
+    public function driver(): string
+    {
+        return 'captured-intent';
+    }
+
+    public function requiresIntent(): bool
+    {
+        return true;
+    }
+
+    public function component(): string
+    {
+        return 'stripe-card';
+    }
+}
+
+beforeEach(function () {
+    CapturedIntentGateway::$refunds = [];
+
+    Payments::extend('captured-intent', fn () => app(CapturedIntentGateway::class));
+    app(PaymentMethodRegistry::class)->add(CapturedIntentMethod::class);
+});
+
+function capturedSession(): CheckoutSession
+{
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = CheckoutCart::session($cart);
+
+    $session->forceFill([
+        'status' => PaymentProcessing::$name,
+        'payment_intent_ref' => 'pi_captured_pinned',
+        'payment_processing_at' => now(),
+        'cart_fingerprint' => CheckoutCart::fingerprint($session),
+        'meta' => ['payment_method' => 'captured-intent', 'payment_handle' => 'captured-card'],
+    ])->save();
+
+    return $session->refresh();
+}
+
+it('refunds and reopens when the order cannot be built after the money was captured', function () {
+    Exceptions::fake();
+    $session = capturedSession();
+
+    config()->set('lunar.orders.pipelines.creation', [
+        fn () => throw new RuntimeException('order pipeline down'),
+    ]);
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('refunded')
+        ->and(CapturedIntentGateway::$refunds)->toBe([['reference' => 'pi_captured_pinned', 'amount' => $session->amount_total]])
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0);
+
+    Exceptions::assertReported(fn (RuntimeException $e) => $e->getMessage() === 'order pipeline down');
+});
+
+it('keeps the sweep going past a session whose completion throws', function () {
+    Exceptions::fake();
+    $failing = capturedSession();
+    $failing->forceFill(['payment_processing_at' => now()->subHours(2)])->save();
+
+    config()->set('lunar.orders.pipelines.creation', [
+        fn () => throw new RuntimeException('order pipeline down'),
+    ]);
+
+    $this->artisan('lunar:checkout:reconcile')->assertSuccessful();
+
+    expect($failing->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and(CapturedIntentGateway::$refunds)->toHaveCount(1);
+});
+
+it('never refunds a session a concurrent completion already placed', function () {
+    $session = capturedSession();
+
+    $real = app(CheckoutDriver::class);
+    $proxy = Mockery::mock($real)->makePartial();
+    $proxy->shouldReceive('complete')->andReturnUsing(function (CheckoutSession $s) use ($real) {
+        // The other process (the webhook) wins the guarded write first.
+        $real->complete($s->replicate()->forceFill(['id' => $s->id])->setRelations([]));
+
+        throw new CheckoutSessionConflictException('frozen');
+    });
+    app()->instance(CheckoutDriver::class, $proxy);
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('completed')
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
+        ->and($session->refresh()->status)->toBeInstanceOf(Completed::class)
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(1);
+});
