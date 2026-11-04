@@ -270,7 +270,8 @@ This is the **default `LunarCheckoutDriver`'s `complete`**. An order exists befo
 taken: on a gateway method the pay boundary already drafted the cart's Lunar order (`placed_at`
 null) in the pin's transaction ([[0010-cart-session-reconciliation]] §E). On confirmed payment
 ([[0002-payment-methods-and-driver]]): the session transitions `PaymentProcessing → Completed`,
-that draft is rebuilt from the verified cart and placed at `AwaitingPayment` (then `→ InProcess` +
+that draft, verified against the pinned fingerprint and used as built, is placed at
+`AwaitingPayment` (then `→ InProcess` +
 `placed_at` per 0002), and `order_reference` is written. The synchronous path has no earlier pin,
 so it creates the order (or adopts and rebuilds a draft an earlier failed attempt left) inside
 `complete()`. (A non-Lunar driver reaches `Completed` the same way but creates its

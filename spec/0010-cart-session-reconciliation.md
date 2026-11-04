@@ -330,7 +330,7 @@ order at the pin (§E); completion adopts the cart's draft rather than creating 
 second order, and the synchronous path creates or adopts it inside `complete()`:
 
 1. **Re-verify, under a consistent read.** Inside the same transaction that
-   creates the order, the driver recomputes the live fingerprint and requires it
+   places the order, the driver recomputes the live fingerprint and requires it
    to equal the session's **pinned** fingerprint. The Lunar driver reads the
    cart row **and** its lines/addresses `FOR UPDATE` **once**, computes the
    verification fingerprint **from that loaded set**, and builds the order
