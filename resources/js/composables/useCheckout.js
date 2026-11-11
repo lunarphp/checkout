@@ -1,6 +1,7 @@
 import { computed, inject, provide, reactive, watch } from 'vue'
 import { router } from '@inertiajs/vue3'
 import { money } from '../utils/money.js'
+import { trackCheckoutEvent, trackCheckoutStart } from '../utils/analytics.js'
 
 export const CHECKOUT_KEY = Symbol('lunar-checkout')
 
@@ -135,6 +136,9 @@ export function createCheckout(data) {
   })
 
   state.method = state.paymentMethods[0]?.handle ?? null
+
+  // GA4 begin_checkout for a host running Tag Manager, once per session.
+  trackCheckoutStart(data.uuid, { items: state.items, currency: state.currency })
 
   // Bounced back from the processing page: the gateway reported the charge
   // failed and the session was reopened for another attempt.
@@ -360,6 +364,30 @@ export function createCheckout(data) {
     },
   )
 
+  // GA4 step events for a host running Tag Manager (utils/analytics.js).
+  // Shipping is sent once per tier chosen, payment once per method paid with,
+  // so a retry or a reselection is not counted twice.
+  const trackedShipping = new Set()
+  const trackedPayment = new Set()
+
+  function trackShipping(tier) {
+    if (!tier || trackedShipping.has(tier)) return
+
+    if (trackCheckoutEvent('add_shipping_info', { items: state.items, currency: state.currency, shipping_tier: tier })) {
+      trackedShipping.add(tier)
+    }
+  }
+
+  function trackPayment(method) {
+    const type = method?.handle
+
+    if (!type || trackedPayment.has(type)) return
+
+    if (trackCheckoutEvent('add_payment_info', { items: state.items, currency: state.currency, payment_type: type })) {
+      trackedPayment.add(type)
+    }
+  }
+
   // Select a shipping option. Optimistic highlight, server-confirmed — the
   // reload brings back the cart's stored selection and recalculated totals.
   function selectShipping(id) {
@@ -373,6 +401,9 @@ export function createCheckout(data) {
         preserveScroll: true,
         preserveState: true,
         only: ['checkout'],
+        onSuccess: () => {
+          trackShipping(state.shippingMethods.find((m) => m.id === id)?.name)
+        },
         onError: () => {
           state.shippingId = previous
         },
@@ -395,6 +426,9 @@ export function createCheckout(data) {
         preserveScroll: true,
         preserveState: true,
         only: ['checkout'],
+        onSuccess: () => {
+          if (mode === 'collect') trackShipping(collectOption.value?.name ?? 'Collect')
+        },
         onError: () => {
           state.fulfilment = previous
         },
@@ -526,6 +560,12 @@ export function createCheckout(data) {
       state.payError = paymentFormError || 'The payment form has not loaded. Refresh the page and try again.'
       return
     }
+
+    // The step before payment may never have been a click: a single
+    // shipping option the server chose, say. Send it now so the funnel
+    // has no gap, then the payment step.
+    trackShipping(state.fulfilment === 'collect' ? (collectOption.value?.name ?? 'Collect') : shippingMethod.value?.name)
+    trackPayment(activePaymentMethod.value)
 
     state.processing = true
     state.payError = ''

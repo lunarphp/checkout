@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\View;
 use Lunar\Checkout\DataObjects\CheckoutTheme;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
@@ -52,4 +53,33 @@ it('emits the pinnable accent tints as tokens', function () {
         '--accent-soft-border' => '#d3ecd9',
         '--accent-ring' => 'rgba(45, 142, 66, 0.16)',
     ]);
+});
+
+/**
+ * The host's head hook: a store overriding lunar-checkout::partials.head
+ * (a tag manager, a consent script) gets it into the checkout document.
+ */
+it('renders the host head partial when the store overrides it', function () {
+    $views = sys_get_temp_dir().'/lunar-checkout-head-'.uniqid();
+    mkdir($views.'/partials', recursive: true);
+    file_put_contents($views.'/partials/head.blade.php', '<script data-test="host-head">window.hostHead = true</script>');
+
+    View::prependNamespace('lunar-checkout', $views);
+
+    $cart = CheckoutCart::orderable();
+    $session = CheckoutCart::session($cart);
+
+    $this->withoutVite()->get(route('lunar.checkout.show', $session->uuid))
+        ->assertOk()
+        ->assertSee('<script data-test="host-head">window.hostHead = true</script>', false);
+});
+
+it('adds nothing to the head when the store leaves the hook alone', function () {
+    $cart = CheckoutCart::orderable();
+    $session = CheckoutCart::session($cart);
+
+    $this->withoutVite()->get(route('lunar.checkout.show', $session->uuid))
+        ->assertOk()
+        ->assertDontSee('dataLayer', false)
+        ->assertDontSee('googletagmanager', false);
 });
