@@ -43,9 +43,10 @@ model — is backend-neutral and Lunar-owned. Lunar ships a default `LunarChecko
 > identity, lifecycle, pinned context, non-derivable element data); lines,
 > addresses and shipping options are **derived through the driver**, never stored.
 > The `order_type`/`order_id` morph is likewise replaced by a **driver-opaque
-> `order_reference`** string, renders never write the session row, and completion
-> re-verifies the pinned fingerprint before the order exists
-> ([[0010-cart-session-reconciliation]] §D/§E.2). 0010 §A also adds the
+> `order_reference`** string, renders never write the session row, the Lunar
+> driver drafts the cart's order at the pay boundary, and completion re-verifies
+> the pinned fingerprint before that order is placed
+> ([[0010-cart-session-reconciliation]] §D/§E/§E.2). 0010 §A also adds the
 > concurrency/reconciliation columns (`active_cart_reference`,
 > `payment_processing_at`, `reconciliation_attempts`, `pruned_at`) and the index
 > set. The rows below are updated to match.
@@ -115,7 +116,7 @@ the state machine, the element model — is backend-neutral and Lunar-owned. Two
 | Verb | Responsibility |
 |------|----------------|
 | `createSession($source): CheckoutSession` | **Ingest** an arbitrary source cart → a session. Reads whatever the backend calls a cart (a Lunar `Cart`; or a Statamic simple-product basket; a custom cart — the source type is the driver's concern), produces the **pinned context** (currency, channel, locale) + the initial synced totals (`amount_subtotal`/`amount_total` in minor units) + `cart_fingerprint`, stores the opaque `cart_reference` (no clone, no frozen-line copy — [[0010-cart-session-reconciliation]]), and returns the `uuid`. The default impl is §B |
-| `complete(CheckoutSession $session): mixed` | **Finalise** a session → an order. Re-verifies the pinned fingerprint ([[0010-cart-session-reconciliation]] §E.2), creates the order in whatever system the backend owns, and links it via the driver-opaque `order_reference` (§A). MUST be **idempotent keyed on the session `uuid`** (create-or-fetch) — a non-Lunar driver cannot share a transaction with a remote order system ([[0010-cart-session-reconciliation]] §E.2). For the Lunar driver this is §E (Lunar `Order` + `AwaitingPayment → InProcess`); a non-Lunar driver defines its own order creation |
+| `complete(CheckoutSession $session): mixed` | **Finalise** a session → a placed order. Re-verifies the pinned fingerprint ([[0010-cart-session-reconciliation]] §E.2), creates or adopts the order in whatever system the backend owns (the Lunar driver adopts the draft its pay boundary made, [[0010-cart-session-reconciliation]] §E), places it, and links it via the driver-opaque `order_reference` (§A). MUST be **idempotent keyed on the session `uuid`** (create-or-fetch) — a non-Lunar driver cannot share a transaction with a remote order system ([[0010-cart-session-reconciliation]] §E.2). For the Lunar driver this is §E (Lunar `Order` + `AwaitingPayment → InProcess`); a non-Lunar driver defines its own order creation |
 
 **Why driver-based.** The pinned snapshot is **backend-neutral** — minor-unit totals, a currency,
 a locale, a content fingerprint — so the session, element model, payment layer, and hosted page behave
@@ -265,15 +266,21 @@ element ever touches a backend cart model directly.
 
 ### E. Completion
 
-This is the **default `LunarCheckoutDriver`'s `complete`**. On confirmed payment
-([[0002-payment-methods-and-driver]]): the session transitions `PaymentProcessing → Completed`, a
-Lunar order is created at `AwaitingPayment` (then `→ InProcess` + `placed_at` per 0002), and
-`order_reference` is written. (A non-Lunar driver reaches `Completed` the same way but creates its
+This is the **default `LunarCheckoutDriver`'s `complete`**. An order exists before any money is
+taken: on a gateway method the pay boundary already drafted the cart's Lunar order (`placed_at`
+null) in the pin's transaction ([[0010-cart-session-reconciliation]] §E). On confirmed payment
+([[0002-payment-methods-and-driver]]): the session transitions `PaymentProcessing → Completed`,
+that draft, verified against the pinned fingerprint and used as built, is placed at
+`AwaitingPayment` (then `→ InProcess` +
+`placed_at` per 0002), and `order_reference` is written. The synchronous path has no earlier pin,
+so it creates the order (or adopts and rebuilds a draft an earlier failed attempt left) inside
+`complete()`. (A non-Lunar driver reaches `Completed` the same way but creates its
 own order — §"The checkout driver".)
 
-Before the order exists, `complete()` **re-verifies** the live cart against the session's pinned
-fingerprint inside the order-creation transaction; a mismatch or creation failure resolves under
-the **refund invariant** — no charge survives without an order
+Before the order is placed, `complete()` **re-verifies** the live cart against the session's
+pinned fingerprint inside the placement transaction; a mismatch or failure resolves under the
+**refund invariant**: no charge survives without a placed order. A refunded or voided attempt
+leaves the draft unplaced on the cart, and the next Pay reuses it
 ([[0010-cart-session-reconciliation]] §E.2).
 
 Completion is **idempotent and guarded**: the `→ Completed` transition is an atomic guarded write
@@ -357,7 +364,8 @@ follow-up.
   `PaymentProcessing` rejects element stores.
 - Completion creates exactly one order even under duplicate callbacks **and double-submitted
   synchronous completions** (atomic guarded transition), re-verifies the pinned fingerprint
-  before the order insert, writes `order_reference`, and (Lunar driver) transitions the order
+  before placing the order (on the async path, the draft the pay boundary made), writes
+  `order_reference`, and (Lunar driver) transitions the order
   `AwaitingPayment → InProcess`; a post-capture mismatch or creation failure refunds and returns
   the session to `Open` ([[0010-cart-session-reconciliation]] §E.2).
 - The active driver resolves by name from `config('lunar.checkout.driver')` (default `lunar`); a

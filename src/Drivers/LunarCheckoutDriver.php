@@ -106,11 +106,12 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
     }
 
     /**
-     * Spec 0010 §E.2 — re-verify, then order; no charge without an order.
-     * Synchronous path (`Open`): the pay gate runs here, in the same
-     * transaction as order creation, against the submitted confirmation token.
-     * Async path (`PaymentProcessing`): the live cart must still match the
-     * fingerprint pinned at the gate. Idempotent keyed on the session.
+     * Spec 0010 §E.2: drafted at the pin; re-verify, then place. Synchronous
+     * path (`Open`): the pay gate runs here, in the same transaction as order
+     * creation, against the submitted confirmation token. Async path
+     * (`PaymentProcessing`): the live cart must still match the fingerprint
+     * pinned at the gate, which drafted the order. Idempotent keyed on the
+     * session.
      */
     public function complete(CheckoutSession $session, ?string $confirmationToken = null): mixed
     {
@@ -169,11 +170,18 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
             }
 
             /*
-             * Adopt the order the gateway's authorize() path already created
-             * for this cart (webhook-first race) rather than minting a second
-             * one; only a cart with no order yet creates here.
+             * Adopt the order a webhook-first authorize() already placed.
+             * Otherwise adopt the draft as built only when the pay gate built
+             * it from exactly the cart just verified, so no rebuild runs after
+             * capture. Any other draft (one an earlier failed attempt left, or
+             * one a session pinned without the gate never refreshed) predates
+             * a cart change: createOrder() reuses it and rebuilds it here.
              */
-            $order = $cart->completedOrder ?: $cart->draftOrder ?: $cart->createOrder();
+            $draft = $cart->draftOrder;
+
+            $order = $cart->completedOrder
+                ?? ($draft !== null && ($draft->meta['checkout_fingerprint'] ?? null) === $live->fingerprint ? $draft : null)
+                ?? $cart->createOrder();
 
             $this->stampContactEmail($session, $cart, $order);
 
@@ -306,55 +314,78 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
     /**
      * The pay-boundary gate (spec 0010 §E): step 0 (pinned currency/channel),
-     * token match, Gate 2, then the atomic one-statement pin.
+     * token match, Gate 2, the atomic one-statement pin, then the cart's
+     * draft order, so an order exists before any money moves.
      */
     public function assertReadyForPayment(CheckoutSession $session, string $confirmedFingerprint): void
     {
-        $cart = $this->resolveCart($session)->calculate();
-        $live = $this->buildSnapshot($cart);
+        // Step 0 runs outside the transaction: a diverged context voids the
+        // gateway intent and cancels the session, and a rollback must not
+        // undo that half while the void stands.
+        $this->assertPinnedContext($session, $this->buildSnapshot($this->resolveCart($session)->calculate()));
 
-        $this->assertPinnedContext($session, $live);
+        $this->db->transaction(function () use ($session, $confirmedFingerprint) {
+            // Verify, pin and draft from one locked read of the cart, so the
+            // draft holds exactly what the pinned fingerprint covers.
+            $cart = Cart::query()
+                ->whereKey((int) $session->cart_reference)
+                ->lockForUpdate()
+                ->first();
 
-        if (! hash_equals($confirmedFingerprint, $live->fingerprint)) {
-            $this->events->dispatch(new CheckoutPaymentConfirmationFailed($session));
+            if ($cart === null) {
+                throw new CheckoutSessionNotOperableException('The session\'s source cart no longer exists.');
+            }
 
-            throw new PaymentConfirmationException('fingerprint_mismatch');
-        }
+            $cart->calculate();
+            $live = $this->buildSnapshot($cart);
 
-        $this->assertPickupPointChosen($cart);
-        $this->assertShippingOptionChosen($cart);
-        $this->assertContactKnown($session, $cart);
+            if (! hash_equals($confirmedFingerprint, $live->fingerprint)) {
+                $this->events->dispatch(new CheckoutPaymentConfirmationFailed($session));
 
-        if (! $cart->canCreateOrder()) {
-            throw new PaymentConfirmationException('cart_not_orderable');
-        }
+                throw new PaymentConfirmationException('fingerprint_mismatch');
+            }
 
-        // The pin: one guarded statement — the expiry predicate lives here,
-        // not in a pre-check (spec 0010 §E).
-        $pinned = CheckoutSession::query()
-            ->whereKey($session->getKey())
-            ->where('status', Open::$name)
-            ->where(fn ($query) => $query->whereNull('expires_at')->orWhere('expires_at', '>', now()))
-            ->update([
-                'status' => PaymentProcessing::$name,
-                'amount_subtotal' => $live->amountSubtotal,
-                'amount_total' => $live->amountTotal,
-                'cart_fingerprint' => $live->fingerprint,
-                'payment_processing_at' => now(),
-                'updated_at' => now(),
-            ]);
+            $this->assertPickupPointChosen($cart);
+            $this->assertShippingOptionChosen($cart);
+            $this->assertContactKnown($session, $cart);
+
+            if (! $cart->canCreateOrder()) {
+                throw new PaymentConfirmationException('cart_not_orderable');
+            }
+
+            // The pin: one guarded statement — the expiry predicate lives here,
+            // not in a pre-check (spec 0010 §E).
+            $pinned = CheckoutSession::query()
+                ->whereKey($session->getKey())
+                ->where('status', Open::$name)
+                ->where(fn ($query) => $query->whereNull('expires_at')->orWhere('expires_at', '>', now()))
+                ->update([
+                    'status' => PaymentProcessing::$name,
+                    'amount_subtotal' => $live->amountSubtotal,
+                    'amount_total' => $live->amountTotal,
+                    'cart_fingerprint' => $live->fingerprint,
+                    'payment_processing_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+            if ($pinned !== 1) {
+                $session->refresh();
+
+                if ($session->isExpired() || ! ($session->status instanceof Open || $session->status instanceof PaymentProcessing)) {
+                    throw new CheckoutSessionNotOperableException('The checkout session is expired or terminal.');
+                }
+
+                throw new CheckoutSessionConflictException('frozen');
+            }
+
+            // Reuses the draft a failed or refunded earlier attempt left
+            // behind, refreshed from this cart (spec 0010 §E). The stamp is
+            // what completion checks before adopting the draft unrebuilt.
+            $draft = $cart->createOrder();
+            $draft->update(['meta' => array_merge((array) $draft->meta, ['checkout_fingerprint' => $live->fingerprint])]);
+        });
 
         $session->refresh();
-
-        if ($pinned === 1) {
-            return;
-        }
-
-        if ($session->isExpired() || ! ($session->status instanceof Open || $session->status instanceof PaymentProcessing)) {
-            throw new CheckoutSessionNotOperableException('The checkout session is expired or terminal.');
-        }
-
-        throw new CheckoutSessionConflictException('frozen');
     }
 
     /*

@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Exceptions;
@@ -22,6 +23,7 @@ use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
+use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
@@ -46,10 +48,10 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
     /** @var array<int, string> */
     public static array $voidedReferences = [];
 
-    /** @var array<int, array{reference: string, amount: int}> */
+    /** @var array<int, array{reference: string, amount: int, unplaced_orders: array<int, int>}> */
     public static array $captureCalls = [];
 
-    /** @var array<int, array{reference: string, amount: int}> */
+    /** @var array<int, array{reference: string, amount: int, unplaced_orders: array<int, int>}> */
     public static array $refundCalls = [];
 
     public static int $holdSequence = 0;
@@ -99,7 +101,11 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
             throw new PaymentIntentException('fake gateway capture failed');
         }
 
-        static::$captureCalls[] = ['reference' => $reference, 'amount' => $amountMinor];
+        static::$captureCalls[] = [
+            'reference' => $reference,
+            'amount' => $amountMinor,
+            'unplaced_orders' => Order::query()->whereNull('placed_at')->pluck('id')->all(),
+        ];
     }
 
     public function fetchIntent(string $reference): PaymentIntentStatus
@@ -138,7 +144,7 @@ class IntentOnlyGateway extends OfflinePayment implements CreatesPaymentIntents,
     /** @var array<int, string> */
     public static array $voidedReferences = [];
 
-    /** @var array<int, array{reference: string, amount: int}> */
+    /** @var array<int, array{reference: string, amount: int, unplaced_orders: array<int, int>}> */
     public static array $refundCalls = [];
 
     public static PaymentIntentStatus $fetchStatus = PaymentIntentStatus::RequiresCapture;
@@ -509,6 +515,24 @@ it('pins a hold session and reconcile captures then completes', function () {
         ->and($session->status)->toBeInstanceOf(Completed::class);
 });
 
+it('has the order drafted before the hold is captured, then places that same order', function () {
+    $session = mintHoldSession();
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'fake',
+        'fingerprint' => CheckoutCart::fingerprint($session),
+    ])->assertOk();
+
+    $draftId = Order::query()->sole()->id;
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect(FakeHoldGateway::$captureCalls)->toHaveCount(1)
+        ->and(FakeHoldGateway::$captureCalls[0]['unplaced_orders'])->toBe([$draftId])
+        ->and((string) $session->refresh()->order_reference)->toBe((string) $draftId)
+        ->and(Order::query()->sole()->placed_at)->not->toBeNull();
+});
+
 it('does not capture policy-mode requires_capture sessions (pre-existing manual policy)', function () {
     $session = mintPinnedStandardSession();
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
@@ -625,6 +649,41 @@ it('voids, never refunds, a stray hold when the driver never supported holds and
         ->and(IntentOnlyGateway::$refundCalls)->toBeEmpty();
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('leaves the draft unplaced when completion voids a stray hold, and the retry reuses it', function () {
+    $session = mintOpenSessionWithIntentOnlyMethod();
+    $session->forceFill([
+        'payment_intent_ref' => 'pi_intent_only_live',
+        'meta' => ['payment_method' => 'intent-only', 'payment_intent_mode' => 'hold'],
+    ])->save();
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'intent-only',
+        'fingerprint' => CheckoutCart::fingerprint($session),
+    ])->assertOk();
+
+    $draftId = Order::query()->sole()->id;
+
+    // Rebuilding a draft whose line quantity changed lazy-loads inside core's
+    // OrderLineQuantity validator, which this suite's strict mode rejects.
+    Model::preventLazyLoading(false);
+    Cart::query()->findOrFail((int) $session->cart_reference)->lines()->firstOrFail()->update(['quantity' => 2]);
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect(IntentOnlyGateway::$voidedReferences)->toBe(['pi_intent_only_live'])
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and(Order::query()->sole()->id)->toBe($draftId)
+        ->and(Order::query()->sole()->placed_at)->toBeNull();
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'intent-only',
+        'fingerprint' => CheckoutCart::fingerprint($session),
+    ])->assertOk();
+
+    expect(Order::query()->sole()->id)->toBe($draftId)
+        ->and(Order::query()->sole()->placed_at)->toBeNull();
 });
 
 it('completes synchronously and voids the hold when a discount drops a hold session to zero', function () {

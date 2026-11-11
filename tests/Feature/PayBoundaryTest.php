@@ -135,7 +135,7 @@ it('syncs the gateway intent to the live total before pinning', function () {
         ->and($session->status)->toBeInstanceOf(PaymentProcessing::class);
 });
 
-it('still pins for confirmation when the method needs an intent', function () {
+it('pins for confirmation with the order drafted but unplaced when the method needs an intent', function () {
     app(PaymentMethodRegistry::class)->add(IntentTestMethod::class);
 
     $session = CheckoutCart::session(CheckoutCart::orderable());
@@ -148,7 +148,9 @@ it('still pins for confirmation when the method needs an intent', function () {
     $session->refresh();
 
     expect($session->status)->toBeInstanceOf(PaymentProcessing::class)
-        ->and(Order::query()->count())->toBe(0);
+        ->and($session->order_reference)->toBeNull()
+        ->and(Order::query()->count())->toBe(1)
+        ->and(Order::query()->first()->placed_at)->toBeNull();
 });
 
 it('completes a zero-total cart synchronously even for an intent method', function () {

@@ -255,7 +255,7 @@ Only when all pass does the session **pin** — `amount_total` to the live total
 *and* `cart_fingerprint` to the live fingerprint — and transition to
 `PaymentProcessing`. The pinned pair is the frozen contract: the amount sent to
 the gateway is the pinned total, and the pinned fingerprint is what the
-completion boundary (§E.2) re-verifies before an order exists. The pin is **one
+completion boundary (§E.2) re-verifies before the order is placed. The pin is **one
 guarded statement** — status, `amount_total`, `amount_subtotal`,
 `cart_fingerprint`, `payment_intent_ref`, and `payment_processing_at` together,
 `WHERE id = ? AND status = 'open' AND (expires_at IS NULL OR expires_at >
@@ -270,6 +270,34 @@ Lunar driver implements the checks with the **driver-owned fingerprint** (§D �
 never `Cart::checkFingerprint()`) + `ValidateCartForOrderCreation`. This is the
 contract point the payment layer ([[0002-payment-methods-and-driver]]) calls
 first; 0002 wires it into the payment entry point.
+
+**The order is drafted inside the pin.** An order exists before any money is
+taken (Lunar spec 0077, "Placement"). The Lunar driver runs steps 1 to 3 and the
+pin inside one database transaction, against one locked read of the cart row
+(the same `lockForUpdate()` read `complete()` takes), and once the pin affects
+its one row it calls `$cart->createOrder()` in that same transaction. The result
+is the cart's **draft order**: built from exactly the cart the pinned
+fingerprint covers, with `placed_at` null. If drafting throws, the transaction
+rolls back the pin and Pay fails with nothing pinned. If the pin affects zero
+rows, the driver throws before drafting, so a lost race, an expiry or a
+supersede leaves no new draft. Step 0 runs before the transaction, because its
+invalidation voids the gateway intent and must not be rolled back. Drafting is
+internal to the Lunar driver's `assertReadyForPayment()`: the `CheckoutDriver`
+contract is unchanged, the session stores no order id while `PaymentProcessing`
+(`order_reference` is still written only at `→ Completed`), and a non-Lunar
+driver may create its order wherever its backend allows, provided §E.2 holds.
+`createOrder()` reuses the cart's existing draft and rebuilds it in place, so a
+retry never mints a second order and never consumes a discount twice.
+Drafting does consume a use of each discount on the cart (core's
+`markAsUsed()`), so an abandoned Pay spends a limited coupon's use and nothing
+gives it back. That is an accepted trade-off; the Pay route is throttled
+(`checkout-pay`: 10 a minute and 30 an hour per IP) so it cannot be exhausted
+cheaply on purpose, and counting the use at placement instead is a core
+follow-up.
+A cart therefore carries at most one draft. A session that pins and is never
+paid leaves that draft behind with `placed_at` null; it is not cleaned up when
+the session expires or is pruned, so anything listing or counting orders MUST
+filter on `placed_at` (core's `Cart::draftOrder()` / `completedOrder()` split).
 
 **Store verbs on the pay path carry the token too.** A client that writes a
 fingerprint input moments before paying (the default flow copies the delivery
@@ -299,14 +327,16 @@ out-of-band change) re-syncing the cart only updates what the customer *sees*;
 nothing authorises a charge except this gate, which always re-checks the live cart
 against the exact amount the customer just confirmed.
 
-### E.2 The completion boundary — re-verify, then order; no charge without an order
+### E.2 The completion boundary: drafted at the pin; re-verify, then place; no charge without an order
 
 Lines, addresses, and shipping are derived from the **live** cart at completion
 (§A), so `complete()` MUST prove the live cart is still the one the customer paid
-for before an order is created:
+for before the order is placed. On the async path the Lunar driver drafted that
+order at the pin (§E); completion adopts the cart's draft rather than creating a
+second order, and the synchronous path creates or adopts it inside `complete()`:
 
 1. **Re-verify, under a consistent read.** Inside the same transaction that
-   creates the order, the driver recomputes the live fingerprint and requires it
+   places the order, the driver recomputes the live fingerprint and requires it
    to equal the session's **pinned** fingerprint. The Lunar driver reads the
    cart row **and** its lines/addresses `FOR UPDATE` **once**, computes the
    verification fingerprint **from that loaded set**, and builds the order
@@ -317,7 +347,18 @@ for before an order is created:
    checkout's own writes; the consistent read closes the out-of-band writer.
    Gate 2 (element re-validation + `canCreateOrder`, §E) runs again here on the
    async path.
-2. **Match → order.** Create the order from the consistent-read set; the
+2. **Match → place.** Adopt the cart's draft as built only when the pin
+   stamped it (`meta.checkout_fingerprint`) with exactly the fingerprint just
+   verified: then it holds what was paid for, and no order build runs after
+   capture. Any other draft (one an earlier failed attempt left, or one a
+   session pinned without the gate never refreshed, such as a payment the
+   gateway confirmed with no Pay step) is rebuilt by `createOrder()` from the
+   consistent-read set, which also creates the order when there is none. Then
+   record the payment on the order and stamp `placed_at`. An order a
+   webhook-first `authorize()` already placed is adopted as it stands. A
+   gateway's own `authorize()` that reads `$cart->draftOrder` directly (core
+   Stripe does) is outside this check: a payment confirmed with no Pay after a
+   cart change meets the stale draft there, and fixing that belongs in core. The
    guarded `→ Completed` write sets `order_reference` **in the same statement**,
    after the order exists. The transition is the same atomic guarded write as §E
    (`WHERE status IN (open, payment_processing)`), which also covers the
@@ -373,6 +414,13 @@ for before an order is created:
      reference when one exists. A non-Lunar driver may substitute its own
      remediation (a backorder, a manual-review hold) but MUST NOT silently
      retain a charge that produced no order.
+   - **The draft survives, unplaced.** Neither a void nor a refund touches the
+     order the pin drafted: it stays on the cart with `placed_at` null and no
+     session points at it. The next Pay on the reopened session reuses that same
+     order, rebuilt from the cart the customer confirms then, so a retry keeps
+     one order id. A synchronous retry (an offline method, or a total a discount
+     dropped to zero) rebuilds it the same way inside `complete()`, never placing
+     a draft that predates a cart change.
 
 **`→ Open` return-path hygiene** (normative — every return path, here and in
 §F): the guarded UPDATE that returns a session to `Open` **clears
@@ -601,8 +649,14 @@ states (`Expired`, etc.); the table does not duplicate those.
   charged exactly that. An out-of-band change that bypasses the store verbs (e.g. a
   direct `setShippingAddress` from another tab) still changes the fingerprint — the
   token is a commitment to an exact amount.
+- Pay on a gateway method drafts exactly one unplaced order for the cart in the
+  pin's transaction; a rejected pin (stale token, expired session, a concurrent
+  Pay that lost) drafts nothing, and a draft that fails to build leaves the
+  session `Open` and unpinned (§E).
 - `complete()` re-verifies the live fingerprint against the pinned one inside the
-  order-creation transaction; a duplicate callback or double-submitted synchronous
+  order-placement transaction and places the drafted order (same id, with the
+  payment's `Transaction` rows on it); a webhook-first placement adopts that same
+  draft; a duplicate callback or double-submitted synchronous
   completion yields exactly one order; a post-capture mismatch or order-creation
   failure refunds the charge and returns the session to `Open`
   (`CheckoutCompletionFailed`) — no charge survives without an order. Any
@@ -610,7 +664,9 @@ states (`Expired`, etc.); the table does not duplicate those.
   captured) path under the session row lock, except a deadlock or lost
   connection, which retries; a session checkout's own concurrent completion
   placed is never refunded, and an order the gateway placed since the pin
-  stalls to the operator instead of being refunded.
+  stalls to the operator instead of being refunded. A refunded or voided
+  completion leaves the draft unplaced, and the next Pay reuses its id; a hold
+  is captured only after the pin drafted the order.
 - Invalidating a `PaymentProcessing` session voids the intent first; an
   unabortable intent leaves the session in `PaymentProcessing` for §E.2 — never a
   terminal state with an unresolved charge.
