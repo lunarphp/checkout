@@ -539,7 +539,10 @@ ran because the browser had left the page. When that request carries Stripe's
 page runs the customer-initiated release before it renders: `→ Open` with the
 intent kept, only on the gateway's word that nothing was captured (a captured
 intent resolves through §E.2 instead), then a redirect to the retry state.
-Without those parameters the session waits out the window above.
+Without those parameters the session waits out the window above. Stripe's
+return URL documentation lists `payment_intent` but not `redirect_status`, so
+the shortcut depends on a parameter Stripe sends without documenting it, and
+its absence only costs the wait.
 
 ### F.2 One active session per cart
 

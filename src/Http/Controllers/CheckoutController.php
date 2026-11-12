@@ -1468,6 +1468,10 @@ class CheckoutController extends Controller
      * counts. These are the only gateway parameters the controller reads,
      * and they grant nothing new: the session's owner can already ask for
      * the same release through releasePayment().
+     *
+     * Stripe's return_url documentation lists `payment_intent` but not
+     * `redirect_status`, which it sends all the same. A return without it
+     * is not treated as a failure: the session waits for reconciliation.
      */
     private function returnedFromFailedRedirect(Request $request, CheckoutSessionModel $session): bool
     {
