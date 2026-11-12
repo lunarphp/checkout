@@ -9,15 +9,16 @@ use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Channel;
 use Lunar\Core\Models\Currency;
 use Lunar\Core\Models\CustomerGroup;
+use Lunar\Core\Models\Language;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
 
 uses(TestCase::class, RefreshDatabase::class);
 
 /**
- * Storefront context every request has in a real app (default channel +
- * currency), without a cart — so CartSession::current() can resolve and
- * return null rather than throw.
+ * Storefront context every request has in a real app (default channel,
+ * currency and language), without a cart — so CartSession::current() can
+ * resolve and return null rather than throw.
  *
  * @return array{0: Channel, 1: Currency}
  */
@@ -27,6 +28,10 @@ function routeCheckoutContext(): array
     // colliding on the unique channel handle / currency code.
     if (! CustomerGroup::query()->where('default', true)->exists()) {
         CustomerGroup::factory()->create(['default' => true]);
+    }
+
+    if (! Language::query()->where('default', true)->exists()) {
+        Language::factory()->create(['code' => 'en', 'default' => true]);
     }
 
     $channel = Channel::query()->firstWhere('handle', 'webstore')
