@@ -492,7 +492,7 @@ class CheckoutController extends Controller
             'coupon' => $driver->getCoupon($session),
             // The pay boundary echoes back the fingerprint of the state the
             // customer confirmed (spec 0010 §E).
-            'fingerprint' => $driver->fingerprint($session),
+            'fingerprint' => $snapshot->fingerprint,
             'paymentMethods' => array_map(fn (PaymentMethod $method): array => [
                 'handle' => $method->handle(),
                 'label' => $method->label(),
@@ -1058,8 +1058,8 @@ class CheckoutController extends Controller
 
         try {
             $descriptor = $holdMode
-                ? $gateway->createHold($cart->calculate())
-                : $gateway->createIntent($cart->calculate());
+                ? $gateway->createHold($cart->recalculate())
+                : $gateway->createIntent($cart->recalculate());
         } catch (\Throwable $e) {
             // Gateway errors carry internals (Stripe's minimum-charge copy
             // links to its own docs); log the real one, say something human.

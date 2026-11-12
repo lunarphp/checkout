@@ -75,7 +75,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
         return $this->createCheckoutSession->execute(
             $source,
-            $this->buildSnapshot($source->calculate()),
+            $this->buildSnapshot($source->recalculate()),
             $attributes,
         );
     }
@@ -131,8 +131,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
                 throw new CheckoutSessionNotOperableException('The session\'s source cart no longer exists.');
             }
 
-            $cart->calculate();
-            $live = $this->buildSnapshot($cart);
+            $live = $this->buildSnapshot($cart->recalculate());
 
             $isSync = $session->status instanceof Open;
 
@@ -304,7 +303,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
     public function snapshot(CheckoutSession $session): CartSnapshot
     {
-        return $this->buildSnapshot($this->resolveCart($session)->calculate());
+        return $this->buildSnapshot($this->resolveCart($session)->recalculate());
     }
 
     public function fingerprint(CheckoutSession $session): string
@@ -336,8 +335,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
                 throw new CheckoutSessionNotOperableException('The session\'s source cart no longer exists.');
             }
 
-            $cart->calculate();
-            $live = $this->buildSnapshot($cart);
+            $live = $this->buildSnapshot($cart->recalculate());
 
             if (! hash_equals($confirmedFingerprint, $live->fingerprint)) {
                 $this->events->dispatch(new CheckoutPaymentConfirmationFailed($session));
