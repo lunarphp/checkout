@@ -993,7 +993,7 @@ class CheckoutController extends Controller
             'renew' => ['sometimes', 'boolean'],
         ]);
 
-        $cart = Cart::query()->findOrFail((int) $session->cart_reference);
+        $cart = $this->freshCart($session);
 
         $method = $this->resolveAvailableMethod($methods, $cart, $data['payment_method']);
 
@@ -1058,8 +1058,8 @@ class CheckoutController extends Controller
 
         try {
             $descriptor = $holdMode
-                ? $gateway->createHold($cart->recalculate())
-                : $gateway->createIntent($cart->recalculate());
+                ? $gateway->createHold($cart)
+                : $gateway->createIntent($cart);
         } catch (\Throwable $e) {
             // Gateway errors carry internals (Stripe's minimum-charge copy
             // links to its own docs); log the real one, say something human.
@@ -1145,7 +1145,7 @@ class CheckoutController extends Controller
             'payment_method' => ['required', 'string'],
         ]);
 
-        $cart = Cart::query()->findOrFail((int) $session->cart_reference);
+        $cart = $this->freshCart($session);
 
         $method = $this->resolveAvailableMethod($methods, $cart, $data['payment_method']);
 
@@ -1155,7 +1155,7 @@ class CheckoutController extends Controller
 
         // Live amount, not the session's pinned figure — the pin happens
         // inside assertReadyForPayment(), after this decision.
-        $amountTotal = $checkoutDriver->snapshot($session)->amountTotal;
+        $amountTotal = $cart->total?->value ?? 0;
 
         /*
          * The gateway intent was created when the payment form mounted, and
@@ -1184,9 +1184,7 @@ class CheckoutController extends Controller
                     ]);
                 }
             } elseif ($gateway instanceof SyncsPaymentIntents) {
-                $gateway->syncIntent(
-                    Cart::query()->findOrFail((int) $session->cart_reference)->calculate(),
-                );
+                $gateway->syncIntent($cart);
             }
         }
 
@@ -1431,6 +1429,19 @@ class CheckoutController extends Controller
             'contact_required' => 'Enter your email address so we can send your order confirmation, then try again.',
             default => 'The payment could not be started. Refresh the page and try again.',
         };
+    }
+
+    /**
+     * The session's cart with totals from the pipeline, not the persisted
+     * snapshot: method availability, payment guards and the gateway amount
+     * are all money decisions, and the pin that follows uses fresh totals.
+     */
+    private function freshCart(CheckoutSessionModel $session): Cart
+    {
+        return Cart::query()
+            ->with('lines.purchasable')
+            ->findOrFail((int) $session->cart_reference)
+            ->recalculate();
     }
 
     /**

@@ -90,11 +90,59 @@ class FreshTotalsMethod extends AbstractPaymentMethod
     }
 }
 
+/**
+ * A credit-limit style method: offered only while the basket stays within a
+ * limit, the way a host's on-account closure decides.
+ */
+class FreshLimitedAccountMethod extends AbstractPaymentMethod
+{
+    public function handle(): string
+    {
+        return 'fresh-account';
+    }
+
+    public function label(): string
+    {
+        return 'Pay on account';
+    }
+
+    public function driver(): string
+    {
+        return 'offline';
+    }
+
+    public function component(): string
+    {
+        return 'offline-notice';
+    }
+
+    public function isAvailable(Cart $cart): bool
+    {
+        return $cart->calculate()->total->value <= 2000;
+    }
+}
+
+class FreshLimitedCardMethod extends FreshTotalsMethod
+{
+    public function handle(): string
+    {
+        return 'fresh-limited-card';
+    }
+
+    public function isAvailable(Cart $cart): bool
+    {
+        return $cart->calculate()->total->value <= 2000;
+    }
+}
+
 beforeEach(function () {
     FreshTotalsGateway::$seen = [];
 
     Payments::extend('fresh-totals', fn () => app(FreshTotalsGateway::class));
-    app(PaymentMethodRegistry::class)->add(FreshTotalsMethod::class);
+    app(PaymentMethodRegistry::class)
+        ->add(FreshTotalsMethod::class)
+        ->add(FreshLimitedAccountMethod::class)
+        ->add(FreshLimitedCardMethod::class);
 });
 
 function calculatedSession(): CheckoutSession
@@ -171,4 +219,50 @@ it('creates the hold and pins the session from the repriced total, not the cache
     expect($session->status)->toBeInstanceOf(PaymentProcessing::class)
         ->and($session->amount_total)->toBe(3000)
         ->and(FreshTotalsGateway::$seen['adjustHold'] ?? null)->toBe(3000);
+});
+
+/**
+ * The cart's live price is $live while its persisted totals still say the
+ * session's 1000, which calculate() serves. Returns the fingerprint of the
+ * live basket, the one a customer looking at fresh totals would confirm.
+ */
+function staleCachedTotals(CheckoutSession $session, int $live): string
+{
+    repriceSessionCart($session, $live);
+    $fingerprint = CheckoutCart::fingerprint($session);
+
+    repriceSessionCart($session, 1000);
+    Cart::query()->findOrFail((int) $session->cart_reference)->recalculate();
+
+    repriceSessionCart($session, $live);
+
+    $cached = Cart::query()->findOrFail((int) $session->cart_reference);
+    expect($cached->totalsAreFresh())->toBeTrue()
+        ->and($cached->calculate()->total->value)->toBe(1000);
+    Blink::flush();
+
+    return $fingerprint;
+}
+
+it('decides payment method availability at pay on the repriced total, not the cached one', function () {
+    $session = calculatedSession();
+    $fingerprint = staleCachedTotals($session, 2500);
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'fresh-account',
+        'fingerprint' => $fingerprint,
+    ])->assertUnprocessable()->assertJsonValidationErrors(['payment_method']);
+
+    expect($session->refresh()->order_reference)->toBeNull();
+});
+
+it('decides payment method availability for a new intent on the repriced total, not the cached one', function () {
+    $session = calculatedSession();
+    staleCachedTotals($session, 2500);
+
+    $this->postJson(route('lunar.checkout.payment-intent.store', $session->uuid), [
+        'payment_method' => 'fresh-limited-card',
+    ])->assertUnprocessable()->assertJsonValidationErrors(['payment_method']);
+
+    expect(FreshTotalsGateway::$seen)->not->toHaveKey('createIntent');
 });
