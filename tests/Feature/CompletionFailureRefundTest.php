@@ -29,6 +29,7 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FailingOrderCreationStep;
 use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
@@ -121,9 +122,7 @@ it('refunds and reopens when the order cannot be built after the money was captu
     Exceptions::fake();
     $session = capturedSession();
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
 
@@ -140,9 +139,7 @@ it('keeps the sweep going past a session whose completion throws', function () {
     $failing = capturedSession();
     $failing->forceFill(['payment_processing_at' => now()->subHours(2)])->save();
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     $this->artisan('lunar:checkout:reconcile')->assertSuccessful();
 
@@ -175,9 +172,7 @@ it('retries a deadlocked completion on a later pass instead of refunding', funct
     Exceptions::fake();
     $session = capturedSession();
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('SQLSTATE[40001]: Deadlock found when trying to get lock; try restarting transaction'),
-    ]);
+    FailingOrderCreationStep::register('SQLSTATE[40001]: Deadlock found when trying to get lock; try restarting transaction');
 
     $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
 
@@ -207,9 +202,7 @@ it('keeps the session reopened when a listener throws after the refund', functio
     Exceptions::fake();
     $session = capturedSession();
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
     Event::listen(CheckoutCompletionFailed::class, fn () => throw new LogicException('listener down'));
 
     expect(fn () => app(ReconcilesCheckoutSession::class)->execute($session))

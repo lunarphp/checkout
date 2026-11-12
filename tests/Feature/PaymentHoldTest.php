@@ -28,6 +28,7 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FailingOrderCreationStep;
 use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
@@ -607,9 +608,7 @@ it('refunds the captured hold when completion throws for any reason', function (
     $session = mintPinnedHoldSession();
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     $this->get(route('lunar.checkout.processing', $session->uuid));
 
@@ -624,9 +623,7 @@ it('voids, never refunds, a policy-mode authorisation whose completion throws', 
     $session = mintPinnedStandardSession();
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     $this->get(route('lunar.checkout.processing', $session->uuid));
 

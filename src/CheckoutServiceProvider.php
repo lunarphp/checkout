@@ -37,9 +37,10 @@ use Lunar\Checkout\Shipping\PickupPointModifier;
 use Lunar\Checkout\States\CheckoutSession\DefaultCheckoutSessionStateConfig;
 use Lunar\Checkout\Support\CheckoutAssets;
 use Lunar\Checkout\Validation\Cart\PickupPointRequired;
+use Lunar\Core\Enums\StepList;
 use Lunar\Core\Events\PaymentAttemptEvent;
+use Lunar\Core\Facades\Steps;
 use Lunar\Core\Modifiers\ShippingModifiers;
-use Lunar\Core\Validation\Cart\ValidateCartForOrderCreation;
 use Lunar\Shipping\Models\ShippingZone;
 
 class CheckoutServiceProvider extends ServiceProvider
@@ -166,17 +167,10 @@ class CheckoutServiceProvider extends ServiceProvider
         $this->app->make(ShippingModifiers::class)->add(PickupPointModifier::class);
 
         // Spec 0013 §D: order creation refuses a collect cart with no chosen
-        // point through Lunar's own validator seam, so canCreateOrder() is
-        // the authority for every caller, not only this package's pay boundary.
-        // The default matches core's own fallback for a missing key: setting
-        // the key ends that fallback, so reading it as an empty list would
-        // silently replace core's validator with this package's alone.
-        config([
-            'lunar.cart.validators.order_create' => array_values(array_unique([
-                ...config('lunar.cart.validators.order_create', [ValidateCartForOrderCreation::class]),
-                PickupPointRequired::class,
-            ])),
-        ]);
+        // point through core's step registry, so canCreateOrder() is the
+        // authority for every caller, not only this package's pay boundary.
+        // append() skips a step already listed, so a second boot is harmless.
+        Steps::for(StepList::OrderCreateValidation)->append(PickupPointRequired::class);
 
         $this->loadViewsFrom(__DIR__.'/../resources/views', 'lunar-checkout');
 

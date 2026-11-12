@@ -1,14 +1,26 @@
 <?php
 
+use Lunar\Checkout\CheckoutServiceProvider;
 use Lunar\Checkout\Validation\Cart\PickupPointRequired;
+use Lunar\Core\Enums\StepList;
+use Lunar\Core\Facades\Steps;
 use Lunar\Core\Validation\Cart\ValidateCartForOrderCreation;
-use Lunar\Tests\Checkout\Utils\BareCartValidatorsTestCase;
+use Lunar\Tests\Checkout\TestCase;
 
-uses(BareCartValidatorsTestCase::class);
+uses(TestCase::class);
 
-it('keeps core\'s validator when the host config carries no order_create key', function () {
-    $validators = config('lunar.cart.validators.order_create');
+it('registers the pickup point validator after core\'s own', function () {
+    expect(Steps::for(StepList::OrderCreateValidation)->all())
+        ->toBe([ValidateCartForOrderCreation::class, PickupPointRequired::class]);
+});
 
-    expect($validators)->toContain(ValidateCartForOrderCreation::class)
-        ->and($validators)->toContain(PickupPointRequired::class);
+it('registers through the step registry and leaves the removed config key unset', function () {
+    expect(config()->has('lunar.cart.validators'))->toBeFalse();
+});
+
+it('registers the validator once when the provider boots again', function () {
+    app()->getProvider(CheckoutServiceProvider::class)->boot();
+
+    expect(Steps::for(StepList::OrderCreateValidation)->all())
+        ->toBe([ValidateCartForOrderCreation::class, PickupPointRequired::class]);
 });

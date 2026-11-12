@@ -28,6 +28,7 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FailingOrderCreationStep;
 use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
@@ -240,9 +241,7 @@ it('drafts no second order when a concurrent Pay loses the pin', function () {
 it('leaves the session open when the draft cannot be built', function () {
     $session = draftAtPinSession();
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     expect(fn () => app(CheckoutDriver::class)->assertReadyForPayment($session, CheckoutCart::fingerprint($session)))
         ->toThrow(RuntimeException::class, 'order pipeline down');
@@ -276,9 +275,7 @@ it('places the drafted order without rebuilding it once the payment is captured'
     pressPay($session)->assertSuccessful();
     $draftId = Order::query()->sole()->id;
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     $this->get(route('lunar.checkout.processing', $session->uuid));
 
