@@ -386,10 +386,15 @@ second order, and the synchronous path creates or adopts it inside `complete()`:
    `Open`, so a session reopened mid-completion is never completed. Under the
    same lock, money stays put when the session was re-pinned against another
    intent meanwhile, or when the gateway's own `authorize()` placed an order
-   for the cart since the pin (the failure came after placement): that records
-   an attempt and stalls to the operator instead. An attempt is only counted
-   while the session is still `PaymentProcessing`, and before any listener
-   runs. Residual: a gateway that places the order in its own transaction
+   for this payment (the failure came after placement): that records an
+   attempt and stalls to the operator instead. An order counts as placed for
+   this payment when the gateway announced it for the session's current intent
+   (the success listener notes the order and the intent on the session before
+   it pins or completes, because a session pinned by that announcement is
+   pinned after the order was placed), or when it was placed since the pin. An
+   order an earlier checkout of the same cart placed is neither. An attempt is
+   only counted while the session is still `PaymentProcessing`, and before any
+   listener runs. Residual: a gateway that places the order in its own transaction
    without touching the session row (Stripe's `authorize()` does) can still
    commit that placement while the refund is in flight, so "never refunded"
    holds against checkout's own completion, not against every gateway's. `CheckoutCompletionFailed`

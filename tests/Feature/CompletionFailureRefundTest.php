@@ -16,11 +16,13 @@ use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
+use Lunar\Core\DataObjects\PaymentAuthorize;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
 use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Events\PaymentAttemptEvent;
 use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
@@ -454,4 +456,53 @@ it('leaves a partly refunded payment pinned for the operator', function () {
         ->and(CapturedIntentGateway::$refunds)->toBeEmpty();
 
     Event::assertNotDispatched(CheckoutCompletionFailed::class);
+});
+
+it('never refunds an order the gateway placed before its success pinned the session', function () {
+    Exceptions::fake();
+    $session = capturedSession();
+    $session->forceFill(['status' => Open::$name, 'payment_processing_at' => null])->save();
+
+    $order = Cart::query()->findOrFail((int) $session->cart_reference)->createOrder();
+    $order->update(['placed_at' => now()]);
+
+    // The gateway announces the order after placing it, so the pin that
+    // announcement causes is later than placed_at.
+    $this->travel(5)->seconds();
+
+    Event::listen(OrderPlacing::class, fn () => throw new LogicException('placement vetoed'));
+
+    expect(fn () => PaymentAttemptEvent::dispatch(new PaymentAuthorize(success: true, orderId: $order->id, paymentType: 'captured-intent')))
+        ->toThrow(LogicException::class, 'placement vetoed');
+
+    expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->payment_processing_at->gt($order->refresh()->placed_at))->toBeTrue();
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('retry')
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
+        ->and($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(1);
+});
+
+it('still refunds a later payment on a session whose earlier payment the gateway placed', function () {
+    $session = capturedSession();
+
+    $earlier = Cart::query()->findOrFail((int) $session->cart_reference)->createOrder();
+    $earlier->update(['placed_at' => now()->subDay()]);
+
+    $session->forceFill([
+        'payment_intent_ref' => 'pi_captured_later',
+        'cart_fingerprint' => 'stale',
+        'meta' => array_merge((array) $session->meta, [
+            'gateway_placed_order' => ['order' => $earlier->id, 'intent' => 'pi_captured_earlier'],
+        ]),
+    ])->save();
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session->refresh());
+
+    expect($outcome)->toBe('refunded')
+        ->and(CapturedIntentGateway::$refunds)->toHaveCount(1)
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
 });

@@ -11,6 +11,7 @@ use Lunar\Checkout\Events\CheckoutCompletionFailed;
 use Lunar\Checkout\Events\CheckoutSessionInvalidated;
 use Lunar\Checkout\Events\CheckoutSessionReconciliationStalled;
 use Lunar\Checkout\Exceptions\PaymentConfirmationException;
+use Lunar\Checkout\Listeners\CompleteSessionOnPaymentSuccess;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Checkout\States\CheckoutSession\Cancelled;
 use Lunar\Checkout\States\CheckoutSession\Completed;
@@ -267,18 +268,10 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 return ['not-applicable', null];
             }
 
-            // The gateway's own authorize() placed an order for this cart
-            // since the pin, before complete() failed: returning the money
-            // would leave a placed order unpaid. The operator resolves it.
-            // An order an earlier checkout of the same cart placed does not
-            // count.
-            $placedForThisPayment = Order::query()
-                ->where('cart_id', (int) $session->cart_reference)
-                ->whereNotNull('placed_at')
-                ->when($locked->payment_processing_at, fn ($query, $pinnedAt) => $query->where('placed_at', '>=', $pinnedAt))
-                ->exists();
-
-            if ($placedForThisPayment) {
+            // The gateway's own authorize() placed an order for this
+            // payment before complete() failed: returning the money would
+            // leave a placed order unpaid. The operator resolves it.
+            if ($this->orderPlacedForThisPayment($locked, $reference)) {
                 return ['order-placed', null];
             }
 
@@ -334,6 +327,31 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         }
 
         return $result;
+    }
+
+    /**
+     * Whether the gateway placed an order for the payment the session is
+     * pinned on. Two signals, either enough: the order the gateway announced
+     * for this intent ({@see CompleteSessionOnPaymentSuccess} notes it on the
+     * session), or an order placed since the pin, for a placement whose
+     * announcement never reached that listener. An order an earlier checkout
+     * of the same cart placed matches neither.
+     */
+    private function orderPlacedForThisPayment(CheckoutSession $session, string $reference): bool
+    {
+        $placed = Order::query()
+            ->where('cart_id', (int) $session->cart_reference)
+            ->whereNotNull('placed_at');
+
+        $announced = $session->meta['gateway_placed_order'] ?? null;
+
+        if (($announced['intent'] ?? null) === $reference && (clone $placed)->whereKey($announced['order'] ?? null)->exists()) {
+            return true;
+        }
+
+        return $placed
+            ->when($session->payment_processing_at, fn ($query, $pinnedAt) => $query->where('placed_at', '>=', $pinnedAt))
+            ->exists();
     }
 
     private function resolveByOperator(
