@@ -367,12 +367,14 @@ it('rebuilds a stale draft when a payment arrives on a session pinned without th
     // The gateway took payment with no Pay step: the session is pinned
     // against the live cart the way the webhook listener pins it, and the
     // draft still holds the cart from the first attempt.
+    $live = app(CheckoutDriver::class)->snapshot($session);
+
     $session->forceFill([
         'status' => PaymentProcessing::$name,
         'payment_intent_ref' => 'pi_without_pay',
         'payment_processing_at' => now(),
-        'cart_fingerprint' => CheckoutCart::fingerprint($session),
-        'amount_total' => sessionCart($session)->calculate()->total->value,
+        'cart_fingerprint' => $live->fingerprint,
+        'amount_total' => $live->amountTotal,
     ])->save();
 
     $this->get(route('lunar.checkout.processing', $session->uuid));
