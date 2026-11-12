@@ -496,9 +496,17 @@ without consuming an attempt**, up to a method-declared deadline. An intent
 still **waiting on the customer** (a declined card, an abandoned challenge, an
 async method that failed back to "pick another method") never settles on its
 own, so it is pending only for `reconciliation.requires_action_minutes`
-(default 30, aged on `payment_processing_at`); past that the session returns to
-`Open` with the intent kept, no attempt consumed and no event, so the customer
-can retry and the expiry sweep voids the intent if they never do. After the
+(default 30, aged on `payment_processing_at`); past that the intent is
+**voided first** and the session then returns to `Open` with the reference
+cleared (return-path hygiene, §E.2), no attempt consumed and no event, so the
+customer retries on a fresh intent. The void is what makes the reopen safe: an
+intent left confirmable could take a payment after the session reopened, when
+the sweep no longer watches it and a retry would mint a second intent. A void
+the gateway refuses (the payment went through between the fetch and the void)
+leaves the session `PaymentProcessing` and consumes an attempt, so the next
+pass settles on the real status, and a void that keeps failing stalls. The
+customer-initiated release is the exception that keeps the intent: the customer
+is on the page with the payment element still bound to it. After the
 maximum attempts the session is **stalled**:
 `CheckoutSessionReconciliationStalled` fires **once** (never per-run noise),
 and the session drops to a **low-frequency retry tier** — not silence. The

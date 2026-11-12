@@ -11,12 +11,10 @@ use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\ReconcilesPaymentIntents;
-use Lunar\Core\DataObjects\PaymentAuthorize;
 use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
-use Lunar\Core\Events\PaymentAttemptEvent;
 use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
@@ -42,6 +40,11 @@ class ReleaseTestGateway extends OfflinePayment implements ReconcilesPaymentInte
     /** @var array<int, int> */
     public static array $fetchedCartIds = [];
 
+    /** @var array<int, string> */
+    public static array $voided = [];
+
+    public static bool $throwOnVoid = false;
+
     public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
         static::$fetchedCartIds[] = $cart->id;
@@ -53,7 +56,14 @@ class ReleaseTestGateway extends OfflinePayment implements ReconcilesPaymentInte
         return static::$status ? FakeIntents::snapshot($cart, static::$status) : null;
     }
 
-    public function voidIntent(Cart $cart, string $reference): void {}
+    public function voidIntent(Cart $cart, string $reference): void
+    {
+        if (static::$throwOnVoid) {
+            throw new PaymentIntentException('the intent is no longer voidable');
+        }
+
+        static::$voided[] = $reference;
+    }
 
     public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
@@ -80,6 +90,8 @@ beforeEach(function () {
     ReleaseTestGateway::$status = PaymentIntentStatus::Processing;
     ReleaseTestGateway::$throwOnFetch = false;
     ReleaseTestGateway::$fetchedCartIds = [];
+    ReleaseTestGateway::$voided = [];
+    ReleaseTestGateway::$throwOnVoid = false;
 });
 
 dataset('in-flight intent statuses', [
@@ -102,7 +114,7 @@ it('reconciles a recently pinned in-flight intent to pending without consuming a
         ->and(ReleaseTestGateway::$fetchedCartIds)->toBe([(int) $session->cart_reference]);
 })->with('in-flight intent statuses');
 
-it('reopens a session whose intent has waited on the customer past the window, keeping the intent', function () {
+it('voids an intent that has waited on the customer past the window and reopens the session', function () {
     Event::fake([CheckoutCompletionFailed::class, CheckoutSessionReconciliationStalled::class]);
     ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
 
@@ -113,7 +125,8 @@ it('reopens a session whose intent has waited on the customer past the window, k
     $session->refresh();
 
     expect($session->status)->toBeInstanceOf(Open::class)
-        ->and($session->payment_intent_ref)->toBe('pi_test_123')
+        ->and(ReleaseTestGateway::$voided)->toBe(['pi_test_123'])
+        ->and($session->payment_intent_ref)->toBeNull()
         ->and($session->payment_processing_at)->toBeNull()
         ->and($session->reconciliation_attempts)->toBe(0)
         ->and($session->expires_at->isFuture())->toBeTrue();
@@ -158,7 +171,8 @@ it('reopens a session waiting on the customer whose pin time was never recorded'
     app(ReconcilesCheckoutSession::class)->execute($session);
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class)
-        ->and($session->payment_intent_ref)->toBe('pi_test_123');
+        ->and(ReleaseTestGateway::$voided)->toBe(['pi_test_123'])
+        ->and($session->payment_intent_ref)->toBeNull();
 });
 
 it('lets the sweep free a cart whose payment the customer abandoned', function () {
@@ -178,25 +192,60 @@ it('lets the sweep free a cart whose payment the customer abandoned', function (
         ->and(app(CheckoutDriver::class)->resolveOrCreateSession($cart)->is($session))->toBeTrue();
 });
 
-it('completes a reopened session when the customer finishes the payment afterwards', function () {
+it('keeps the session pinned and counts an attempt when the gateway refuses to void the waiting intent', function () {
+    Event::fake([CheckoutCompletionFailed::class, CheckoutSessionReconciliationStalled::class]);
     ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+    ReleaseTestGateway::$throwOnVoid = true;
 
     $session = pinnedSession(['payment_processing_at' => now()->subMinutes(31)]);
 
+    expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('retry');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->payment_intent_ref)->toBe('pi_test_123')
+        ->and($session->reconciliation_attempts)->toBe(1);
+
+    Event::assertNotDispatched(CheckoutCompletionFailed::class);
+    Event::assertNotDispatched(CheckoutSessionReconciliationStalled::class);
+});
+
+it('completes on the next pass when the payment went through just as the window closed', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+    ReleaseTestGateway::$throwOnVoid = true;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinutes(31)]);
+
+    // The customer finished between the fetch and the void, so the gateway
+    // refuses the void and the next fetch reads the money.
     app(ReconcilesCheckoutSession::class)->execute($session);
 
-    expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+    ReleaseTestGateway::$status = PaymentIntentStatus::Captured;
 
-    $order = Cart::query()->findOrFail((int) $session->cart_reference)->createOrder();
-    $order->update(['placed_at' => now()]);
-
-    PaymentAttemptEvent::dispatch(new PaymentAuthorize(success: true, orderId: $order->id, paymentType: 'release-test'));
+    expect(app(ReconcilesCheckoutSession::class)->execute($session->refresh()))->toBe('completed');
 
     $session->refresh();
 
     expect($session->status)->toBeInstanceOf(Completed::class)
-        ->and((string) $session->order_reference)->toBe((string) $order->id)
-        ->and(Order::query()->count())->toBe(1);
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(1)
+        ->and((string) $session->order_reference)->toBe((string) Order::query()->firstOrFail()->id);
+});
+
+it('stalls for the operator when the waiting intent can never be voided', function () {
+    Event::fake([CheckoutCompletionFailed::class, CheckoutSessionReconciliationStalled::class]);
+    config()->set('lunar.checkout.reconciliation.max_attempts', 2);
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+    ReleaseTestGateway::$throwOnVoid = true;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinutes(31)]);
+
+    expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('retry')
+        ->and(app(ReconcilesCheckoutSession::class)->execute($session->refresh()))->toBe('stalled')
+        ->and($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class);
+
+    Event::assertDispatchedTimes(CheckoutSessionReconciliationStalled::class, 1);
+    Event::assertNotDispatched(CheckoutCompletionFailed::class);
 });
 
 it('counts an attempt when the gateway did not create the reference for the cart', function () {
@@ -445,7 +494,8 @@ it('processing sends a payment that waited on the customer too long back to the 
         ->assertRedirect(route('lunar.checkout.show', $session->uuid).'?payment=failed');
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class)
-        ->and($session->payment_intent_ref)->toBe('pi_test_123');
+        ->and(ReleaseTestGateway::$voided)->toBe(['pi_test_123'])
+        ->and($session->payment_intent_ref)->toBeNull();
 });
 
 it('processing renders the polling page while the outcome is in flight', function (PaymentIntentStatus $status) {

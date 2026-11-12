@@ -31,7 +31,8 @@ use Lunar\Core\Models\Order;
  * gateway's actual intent outcome decides — captured completes (or refunds on
  * mismatch: no charge survives without an order), voided/failed reopens,
  * pending reschedules without consuming an attempt, and an intent left
- * waiting on the customer past its window reopens. Exhausted attempts fire
+ * waiting on the customer past its window is voided and the session reopens.
+ * Exhausted attempts fire
  * {@see CheckoutSessionReconciliationStalled} once; the operator `--resolve`
  * override is the sanctioned stall exit.
  */
@@ -81,9 +82,9 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // Waiting on the customer covers a recorded decline and an
             // abandoned challenge as well as one still under way, and nothing
             // settles the first two. Past the window the cart is freed for a
-            // retry; the intent stays confirmable, so it is kept.
+            // retry.
             PaymentIntentStatus::RequiresAction => $this->waitedOnCustomerTooLong($session)
-                ? $this->reopenKeepingIntent($session, 'intent_'.$status->value)
+                ? $this->voidAndReopen($session, $gateway, $cart, $reference, 'intent_'.$status->value)
                 : 'pending',
 
             PaymentIntentStatus::Captured,
@@ -134,6 +135,30 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         }
 
         return $this->reopenKeepingIntent($session, 'released');
+    }
+
+    /**
+     * Gives up on an intent the customer never finished. The void comes
+     * first: an intent left confirmable could take a payment after the
+     * session reopened, when nothing settles it and a retry mints a second
+     * intent. A void the gateway refuses means the payment may have gone
+     * through since the fetch, so the session stays pinned and the attempt
+     * counts: the next pass reads the real status.
+     */
+    private function voidAndReopen(
+        CheckoutSession $session,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
+        string $reference,
+        string $reason,
+    ): string {
+        try {
+            $gateway->voidIntent($cart, $reference);
+        } catch (PaymentIntentException) {
+            return $this->recordAttempt($session);
+        }
+
+        return $this->reopen($session, $reason);
     }
 
     /**
