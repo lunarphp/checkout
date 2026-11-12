@@ -163,7 +163,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
         if ($session->isHoldMode() && $gateway instanceof SupportsPaymentHolds) {
             try {
-                $gateway->captureHold($reference, (int) $session->amount_total);
+                $gateway->captureHold($cart, $reference, $this->pinnedAmount($session, $cart));
                 $holdCaptured = true;
             } catch (PaymentIntentException $e) {
                 report($e);

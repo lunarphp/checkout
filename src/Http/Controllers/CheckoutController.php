@@ -45,7 +45,8 @@ use Lunar\Core\Contracts\CreatesPaymentIntents;
 use Lunar\Core\Contracts\ReconcilesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
 use Lunar\Core\Contracts\SyncsPaymentIntents;
-use Lunar\Core\DataObjects\HoldDescription;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\HoldAdjustment;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
@@ -288,7 +289,7 @@ class CheckoutController extends Controller
                 [
                     'elements' => $this->projectElements($session),
                     'hold' => [
-                        'amountAuthorised' => $hold->amountMinor,
+                        'amountAuthorised' => $hold->amount->value,
                         'walletLabel' => $hold->walletLabel,
                     ],
                 ],
@@ -312,27 +313,28 @@ class CheckoutController extends Controller
      * in this controller: a session whose window has closed but whose row
      * has not yet been transitioned still reads `Open` and must not render.
      */
-    private function liveHold(CheckoutSessionModel $session): ?HoldDescription
+    private function liveHold(CheckoutSessionModel $session): ?PaymentIntentSnapshot
     {
         if (! $session->status instanceof Open || $session->isExpired() || ! $session->isHoldMode() || $session->payment_intent_ref === null) {
             return null;
         }
 
         $gateway = Payments::driver((string) ($session->meta['payment_method'] ?? ''));
+        $cart = Cart::query()->find((int) $session->cart_reference);
 
-        if (! $gateway instanceof SupportsPaymentHolds) {
+        if (! $gateway instanceof SupportsPaymentHolds || $cart === null) {
             return null;
         }
 
         try {
-            $description = $gateway->describeHold($session->payment_intent_ref);
+            $snapshot = $gateway->fetchIntent($cart, $session->payment_intent_ref);
         } catch (\Throwable $e) {
             report($e);
 
             return null;
         }
 
-        return $description?->status === PaymentIntentStatus::RequiresCapture ? $description : null;
+        return $snapshot?->status === PaymentIntentStatus::RequiresCapture ? $snapshot : null;
     }
 
     /**
@@ -1162,17 +1164,16 @@ class CheckoutController extends Controller
          * customer is looking at BEFORE the pin, so a fingerprint rejection
          * costs nothing and a confirmed charge is never the stale figure.
          *
-         * A confirmed hold cannot be synced like an unconfirmed intent
-         * (Task 3 unit note: `$amountTotal` is Lunar minor units, equal to
-         * Stripe's for GBP): it stretches (incremental authorization) or it
-         * does not, so hold-mode sessions branch to adjustHold() instead of
+         * A confirmed hold cannot be synced like an unconfirmed intent: it
+         * stretches (incremental authorization) or it does not, so hold-mode
+         * sessions branch to adjustHold() instead of
          * SyncsPaymentIntents::syncIntent().
          */
         if ($method->requiresIntent() && $amountTotal > 0) {
             $gateway = Payments::driver($method->driver());
 
             if ($session->isHoldMode() && $gateway instanceof SupportsPaymentHolds && $session->payment_intent_ref !== null) {
-                $adjustment = $gateway->adjustHold($session->payment_intent_ref, $amountTotal);
+                $adjustment = $gateway->adjustHold($cart, $session->payment_intent_ref, new PriceValue($amountTotal, $cart->currency));
 
                 if ($adjustment === HoldAdjustment::NeedsReauthorization) {
                     // Session still Open: nothing to unpin. The client

@@ -2,7 +2,6 @@
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Lunar\Checkout\Models\CheckoutSession;
-use Lunar\Core\DataObjects\HoldDescription;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Tests\Checkout\TestCase;
@@ -11,7 +10,10 @@ use Lunar\Tests\Checkout\Utils\CheckoutCart;
 uses(TestCase::class, RefreshDatabase::class);
 
 beforeEach(function () {
-    FakeHoldGateway::$describeOutcome = null;
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
+    FakeHoldGateway::$fetchScript = [];
+    FakeHoldGateway::$holdAmount = 0;
+    FakeHoldGateway::$walletLabel = null;
 });
 
 /**
@@ -68,11 +70,8 @@ function mintOpenSessionWithStandardIntent(): CheckoutSession
 
 it('renders the confirm page for a session with a live hold', function () {
     $session = mintOpenHoldSession();
-    FakeHoldGateway::$describeOutcome = new HoldDescription(
-        status: PaymentIntentStatus::RequiresCapture,
-        amountMinor: 2000,
-        walletLabel: 'Apple Pay',
-    );
+    FakeHoldGateway::$holdAmount = 2000;
+    FakeHoldGateway::$walletLabel = 'Apple Pay';
 
     $this->get(route('lunar.checkout.confirm', $session->uuid), ['X-Inertia' => 'true'])
         ->assertOk()
@@ -97,9 +96,16 @@ it('redirects when the intent is not hold mode', function () {
 
 it('redirects when the gateway does not verify requires-capture', function () {
     $session = mintOpenHoldSession();
-    FakeHoldGateway::$describeOutcome = new HoldDescription(
-        status: PaymentIntentStatus::Voided, amountMinor: 2000, walletLabel: null,
-    );
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::Voided;
+    FakeHoldGateway::$holdAmount = 2000;
+
+    $this->get(route('lunar.checkout.confirm', $session->uuid))
+        ->assertRedirect(route('lunar.checkout.show', $session->uuid));
+});
+
+it('redirects when the gateway did not create the hold for the cart', function () {
+    $session = mintOpenHoldSession();
+    FakeHoldGateway::$fetchScript = [null];
 
     $this->get(route('lunar.checkout.confirm', $session->uuid))
         ->assertRedirect(route('lunar.checkout.show', $session->uuid));
@@ -107,11 +113,8 @@ it('redirects when the gateway does not verify requires-capture', function () {
 
 it('redirects an unswept expired session even though its row still reads Open', function () {
     $session = mintOpenHoldSession();
-    FakeHoldGateway::$describeOutcome = new HoldDescription(
-        status: PaymentIntentStatus::RequiresCapture,
-        amountMinor: 2000,
-        walletLabel: 'Apple Pay',
-    );
+    FakeHoldGateway::$holdAmount = 2000;
+    FakeHoldGateway::$walletLabel = 'Apple Pay';
 
     // Expiry is swept lazily: backdate expires_at directly, without
     // transitioning `status` away from Open, the way a real session sits
