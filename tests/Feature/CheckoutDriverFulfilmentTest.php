@@ -16,6 +16,7 @@ use Lunar\Core\Models\TaxClass;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
 use Lunar\Tests\Checkout\Utils\PickupPointsStub;
+use Spatie\LaravelBlink\BlinkFacade as Blink;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -147,4 +148,37 @@ it('leaves the shipping row alone when a billing address arrives in delivery mod
     ]);
 
     expect($cart->refresh()->shippingAddress)->toBeNull();
+});
+
+it('stores the collect option on a multi-line cart without lazy loading its purchasables', function () {
+    $cart = driverCart();
+    CheckoutCart::addLine($cart, 2500);
+    $driver = app(CheckoutDriver::class);
+    $session = $driver->resolveOrCreateSession($cart->refresh());
+    Blink::flush();
+
+    $driver->setShippingOption($session, 'collection');
+
+    expect($driver->getFulfilment($session))->toBe('collect')
+        ->and($driver->getSelectedShippingOption($session))->toBe('collection')
+        ->and($driver->getLines($session))->toHaveCount(2);
+});
+
+it('stores the collect option when an address arrives in collect mode on a multi-line cart', function () {
+    $cart = driverCart();
+    CheckoutCart::addLine($cart, 2500);
+    $cart->addresses()->where('type', 'shipping')->delete();
+    $driver = app(CheckoutDriver::class);
+    $session = $driver->resolveOrCreateSession($cart->refresh());
+
+    $driver->setFulfilment($session, 'collect');
+    Blink::flush();
+
+    $driver->storeShippingAddress($session, [
+        'first_name' => 'Terry', 'last_name' => 'Sparks', 'line1' => '1 Trade Counter Way',
+        'city' => 'London', 'postcode' => 'SE1 1AA', 'country_code' => 'GB',
+    ]);
+
+    expect($driver->getSelectedShippingOption($session))->toBe('collection')
+        ->and($driver->getFulfilment($session))->toBe('collect');
 });

@@ -22,7 +22,7 @@ class SetFulfilment implements SetsFulfilment
             ]);
         }
 
-        $cart = $cart->calculate();
+        $cart = $cart->loadMissing('lines.purchasable')->calculate();
         $meta = $cart->meta?->getArrayCopy() ?? [];
         $meta[PickupPoints::MODE_KEY] = $mode;
 
