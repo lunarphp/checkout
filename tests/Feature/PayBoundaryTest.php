@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Exceptions;
 use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\Contracts\GuardsPayment;
 use Lunar\Checkout\Contracts\PaymentMethodRegistry;
@@ -12,6 +13,7 @@ use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\SyncsPaymentIntents;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Order;
@@ -21,6 +23,11 @@ use Lunar\Tests\Checkout\Utils\CheckoutCart;
 use Lunar\Tests\Checkout\Utils\WithoutIntentReconciliation;
 
 uses(TestCase::class, RefreshDatabase::class);
+
+beforeEach(function () {
+    SyncingTestGateway::$syncedAmount = null;
+    SyncingTestGateway::$throwOnSync = false;
+});
 
 /**
  * A method needing no gateway confirmation — offline / pay-on-collection /
@@ -96,6 +103,8 @@ class SyncingTestGateway extends OfflinePayment implements SyncsPaymentIntents
 
     public static ?int $syncedAmount = null;
 
+    public static bool $throwOnSync = false;
+
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
         return new PaymentIntentDescriptor('pi_sync_'.$cart->id);
@@ -103,6 +112,10 @@ class SyncingTestGateway extends OfflinePayment implements SyncsPaymentIntents
 
     public function syncIntent(Cart $cart): void
     {
+        if (static::$throwOnSync) {
+            throw new PaymentIntentException('fake gateway refused to sync the intent');
+        }
+
         static::$syncedAmount = $cart->calculate()->total->value;
     }
 }
@@ -125,7 +138,6 @@ class SyncingIntentTestMethod extends IntentTestMethod
 
 it('syncs the gateway intent to the live total before pinning', function () {
     Payments::extend('sync-test', fn () => app(SyncingTestGateway::class));
-    SyncingTestGateway::$syncedAmount = null;
 
     app(PaymentMethodRegistry::class)->add(SyncingIntentTestMethod::class);
 
@@ -142,6 +154,28 @@ it('syncs the gateway intent to the live total before pinning', function () {
     // changed since. The boundary must hand the gateway the amount it pins.
     expect(SyncingTestGateway::$syncedAmount)->toBe($session->amount_total)
         ->and($session->status)->toBeInstanceOf(PaymentProcessing::class);
+});
+
+it('refuses to pin, with a retry message, when the gateway refuses to sync the intent', function () {
+    Exceptions::fake();
+    Payments::extend('sync-test', fn () => app(SyncingTestGateway::class));
+    SyncingTestGateway::$throwOnSync = true;
+
+    app(PaymentMethodRegistry::class)->add(SyncingIntentTestMethod::class);
+
+    $session = CheckoutCart::session(CheckoutCart::orderable());
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'fingerprint' => CheckoutCart::fingerprint($session),
+        'payment_method' => 'sync-card',
+    ])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.payment_method.0', 'Card payments are unavailable right now. Please try again in a moment.');
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->meta['payment_handle'] ?? null)->toBeNull();
+
+    Exceptions::assertReported(PaymentIntentException::class);
 });
 
 it('pins for confirmation with the order drafted but unplaced when the method needs an intent', function () {

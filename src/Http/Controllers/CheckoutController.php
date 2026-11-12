@@ -49,6 +49,7 @@ use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\HoldAdjustment;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Address;
@@ -1168,12 +1169,24 @@ class CheckoutController extends Controller
          * stretches (incremental authorization) or it does not, so hold-mode
          * sessions branch to adjustHold() instead of
          * SyncsPaymentIntents::syncIntent().
+         *
+         * A cart that left the session's currency is skipped: the gateway
+         * refuses to resize an intent in another currency, and step 0 of
+         * the gate below voids that intent and cancels the session anyway.
          */
-        if ($method->requiresIntent() && $amountTotal > 0) {
+        if ($method->requiresIntent() && $amountTotal > 0 && $cart->currency->code === $session->currency_code) {
             $gateway = Payments::driver($method->driver());
 
             if ($session->isHoldMode() && $gateway instanceof SupportsPaymentHolds && $session->payment_intent_ref !== null) {
-                $adjustment = $gateway->adjustHold($cart, $session->payment_intent_ref, new PriceValue($amountTotal, $cart->currency));
+                try {
+                    $adjustment = $gateway->adjustHold($cart, $session->payment_intent_ref, new PriceValue($amountTotal, $cart->currency));
+                } catch (PaymentIntentException $e) {
+                    // A hold the gateway will not adjust (not this cart's,
+                    // no longer awaiting capture) cannot cover the total.
+                    report($e);
+
+                    $adjustment = HoldAdjustment::NeedsReauthorization;
+                }
 
                 if ($adjustment === HoldAdjustment::NeedsReauthorization) {
                     // Session still Open: nothing to unpin. The client
@@ -1184,7 +1197,15 @@ class CheckoutController extends Controller
                     ]);
                 }
             } elseif ($gateway instanceof SyncsPaymentIntents) {
-                $gateway->syncIntent($cart);
+                try {
+                    $gateway->syncIntent($cart);
+                } catch (PaymentIntentException $e) {
+                    report($e);
+
+                    throw ValidationException::withMessages([
+                        'payment_method' => 'Card payments are unavailable right now. Please try again in a moment.',
+                    ]);
+                }
             }
         }
 

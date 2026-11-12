@@ -165,7 +165,10 @@ session whose intent is hold-flavoured:
 1. Total above authorised: `adjustHold`, BEFORE the pin (where the standard flow syncs its
    intent amount; a confirmed hold's amount cannot be edited, so holds adjust instead of
    syncing). `NeedsReauthorization` is a structured 422 with the session still `Open`:
-   nothing to unpin, the UI opens the re-open-wallet panel.
+   nothing to unpin, the UI opens the re-open-wallet panel. A hold the gateway refuses to
+   adjust at all (a `PaymentIntentException`: not this cart's, or no longer awaiting
+   capture) is reported and gets the same 422. A cart that has left the session's currency
+   skips the adjustment, because gate step 0 voids the hold and cancels the session.
 2. Fingerprint pin, exactly as the standard flow (the squeeze page echoes the fingerprint it
    rendered; any drift is the existing `fingerprint_mismatch` 422). `Open ->
    PaymentProcessing`; the client is sent to the existing `processing` URL.

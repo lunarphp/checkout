@@ -164,6 +164,18 @@ class CheckoutCart
             ]);
         }
 
+        $options = ShippingManifest::getOptions($cart)->map(fn (ShippingOption $option) => new ShippingOption(
+            name: $option->name,
+            description: $option->description,
+            identifier: $option->identifier,
+            price: new PriceValue($option->price->value, $currency),
+            taxClass: $option->taxClass,
+            pickup: $option->pickup,
+        ));
+
+        ShippingManifest::clearOptions();
+        ShippingManifest::addOptions($options);
+
         $cart->update(['currency_id' => $currency->id]);
 
         return $cart->refresh();

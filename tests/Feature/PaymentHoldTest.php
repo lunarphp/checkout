@@ -70,6 +70,8 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
 
     public static bool $throwOnVoid = false;
 
+    public static bool $throwOnAdjust = false;
+
     /**
      * Answers for successive fetches, taken ahead of `$fetchStatus`. Null is
      * a reference the gateway did not create for the cart.
@@ -98,6 +100,10 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
 
     public function adjustHold(Cart $cart, string $reference, PriceValue $amount): HoldAdjustment
     {
+        if (static::$throwOnAdjust) {
+            throw new PaymentIntentException('fake gateway refused to adjust the hold');
+        }
+
         static::$adjustCalls[] = [
             'cart' => $cart->id,
             'reference' => $reference,
@@ -387,6 +393,7 @@ beforeEach(function () {
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
     FakeHoldGateway::$throwOnCapture = false;
     FakeHoldGateway::$throwOnVoid = false;
+    FakeHoldGateway::$throwOnAdjust = false;
     FakeHoldGateway::$fetchScript = [];
     FakeHoldGateway::$holdAmount = 0;
     FakeHoldGateway::$walletLabel = null;
@@ -512,6 +519,46 @@ it('adjusts the hold before pinning and rejects with NeedsReauthorization while 
 
     $response->assertUnprocessable();
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('asks for a fresh authorisation when the gateway refuses to adjust the hold', function () {
+    Exceptions::fake();
+    $session = mintHoldSession();
+    FakeHoldGateway::$throwOnAdjust = true;
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'fake',
+        'fingerprint' => CheckoutCart::fingerprint($session),
+    ])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.hold.0', 'hold_reauthorization_required');
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->meta['payment_handle'] ?? null)->toBeNull();
+
+    Exceptions::assertReported(PaymentIntentException::class);
+});
+
+it('cancels a hold session whose cart changed currency instead of asking the gateway to adjust the hold', function () {
+    Exceptions::fake();
+    $session = mintHoldSession();
+    $hold = $session->payment_intent_ref;
+    FakeHoldGateway::$throwOnAdjust = true;
+
+    CheckoutCart::changeCurrency(Cart::query()->findOrFail((int) $session->cart_reference), 'EUR');
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'fake',
+        'fingerprint' => CheckoutCart::fingerprint($session),
+    ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrorFor('fingerprint');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Cancelled::class)
+        ->and($session->meta['invalidation_reason'] ?? null)->toBe('context_diverged')
+        ->and(FakeHoldGateway::$voidedReferences)->toBe([$hold]);
 });
 
 it('pins a hold session and reconcile captures then completes', function () {
