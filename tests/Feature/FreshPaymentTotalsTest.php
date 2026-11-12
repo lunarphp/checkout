@@ -2,7 +2,11 @@
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
+use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\Contracts\PaymentMethodRegistry;
+use Lunar\Checkout\Events\CheckoutCompletionFailed;
+use Lunar\Checkout\Exceptions\PaymentConfirmationException;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Checkout\PaymentMethods\AbstractPaymentMethod;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
@@ -265,4 +269,50 @@ it('decides payment method availability for a new intent on the repriced total, 
     ])->assertUnprocessable()->assertJsonValidationErrors(['payment_method']);
 
     expect(FreshTotalsGateway::$seen)->not->toHaveKey('createIntent');
+});
+
+/**
+ * The persisted totals still describe the old price, so anything that trusts
+ * calculate() would see the basket the customer confirmed.
+ */
+function expectCachedTotalsServable(CheckoutSession $session, int $cachedTotal): void
+{
+    $cart = Cart::query()->findOrFail((int) $session->cart_reference);
+
+    expect($cart->totalsAreFresh())->toBeTrue()
+        ->and($cart->calculate()->total->value)->toBe($cachedTotal);
+
+    Blink::flush();
+}
+
+it('refuses to pin a session whose cart was repriced behind fresh cached totals', function () {
+    $session = calculatedSession();
+    $fingerprint = CheckoutCart::fingerprint($session);
+
+    repriceSessionCart($session, 2500);
+    expectCachedTotalsServable($session, 1000);
+
+    expect(fn () => app(CheckoutDriver::class)->assertReadyForPayment($session, $fingerprint))
+        ->toThrow(PaymentConfirmationException::class, 'fingerprint_mismatch');
+
+    expect($session->refresh()->status)->not->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->amount_total)->toBe(1000);
+});
+
+it('refuses to complete a pinned session whose cart was repriced behind fresh cached totals', function () {
+    Event::fake([CheckoutCompletionFailed::class]);
+
+    $session = calculatedSession();
+    $driver = app(CheckoutDriver::class);
+    $driver->assertReadyForPayment($session, CheckoutCart::fingerprint($session));
+    expect($session->status)->toBeInstanceOf(PaymentProcessing::class);
+
+    repriceSessionCart($session, 2500);
+    expectCachedTotalsServable($session, 1000);
+
+    expect(fn () => $driver->complete($session))
+        ->toThrow(PaymentConfirmationException::class, 'fingerprint_mismatch');
+
+    Event::assertDispatched(CheckoutCompletionFailed::class, fn (CheckoutCompletionFailed $event): bool => $event->reason === 'verify-mismatch');
+    expect($session->refresh()->order_reference)->toBeNull();
 });
