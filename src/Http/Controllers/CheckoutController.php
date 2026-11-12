@@ -1456,11 +1456,6 @@ class CheckoutController extends Controller
     }
 
     /**
-     * Customer-facing copy for a rejected pay attempt. The exception message
-     * carries the developer reason code ("Payment confirmation rejected
-     * [fingerprint_mismatch]."), which is for logs, not for the customer.
-     */
-    /**
      * Whether Stripe sent the customer back from a redirect payment method
      * that did not go through. StripeCard.vue gives Stripe this page as its
      * `return_url`, and Stripe appends the intent it was confirming and how
@@ -1480,6 +1475,11 @@ class CheckoutController extends Controller
             && $request->query('payment_intent') === $session->payment_intent_ref;
     }
 
+    /**
+     * Customer-facing copy for a rejected pay attempt. The exception message
+     * carries the developer reason code ("Payment confirmation rejected
+     * [fingerprint_mismatch]."), which is for logs, not for the customer.
+     */
     private function paymentRejectionMessage(PaymentConfirmationException $e): string
     {
         return match ($e->reason) {

@@ -34,9 +34,8 @@ use Lunar\Core\Models\Order;
  * mismatch: no charge survives without an order), voided/failed reopens,
  * pending reschedules without consuming an attempt, and an intent left
  * waiting on the customer past its window is voided and the session reopens.
- * Exhausted attempts fire
- * {@see CheckoutSessionReconciliationStalled} once; the operator `--resolve`
- * override is the sanctioned stall exit.
+ * Exhausted attempts fire {@see CheckoutSessionReconciliationStalled} once;
+ * the operator `--resolve` override is the sanctioned stall exit.
  */
 final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 {
