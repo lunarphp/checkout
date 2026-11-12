@@ -42,12 +42,14 @@ use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PickupPoints;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
+use Lunar\Core\Contracts\ReconcilesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\Contracts\SyncsPaymentIntents;
-use Lunar\Core\DataObjects\HoldDescription;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\HoldAdjustment;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Address;
@@ -144,9 +146,29 @@ class CheckoutController extends Controller
      * caller returns a bare 409 SymfonyResponse rather than a RedirectResponse
      * (same reason `start()` above is typed against SymfonyResponse).
      */
-    public function show(CheckoutSessionModel $session, CheckoutDriver $checkoutDriver, CheckoutTheme $theme): Response|RedirectResponse|SymfonyResponse
+    public function show(Request $request, CheckoutSessionModel $session, CheckoutDriver $checkoutDriver, CheckoutTheme $theme): Response|RedirectResponse|SymfonyResponse
     {
         $this->ensureOwnership($session);
+
+        /*
+         * A redirect payment method (Klarna, PayPal, a full-page 3DS
+         * challenge) that failed or was cancelled lands back here with the
+         * session still pinned: the browser left the page, so the in-page
+         * release never ran. Release it now, on the gateway's word that
+         * nothing was captured, and send the customer to the retry state.
+         */
+        if ($session->status instanceof PaymentProcessing && $this->returnedFromFailedRedirect($request, $session)) {
+            try {
+                app(ReconcilesCheckoutSession::class)->release($session);
+                $session->refresh();
+            } catch (\Throwable $e) {
+                report($e);
+            }
+
+            if ($session->status instanceof Open) {
+                return redirect()->to(route('lunar.checkout.show', $session->uuid).'?payment=failed');
+            }
+        }
 
         /*
          * A pinned session normally completes via the gateway webhook, but
@@ -288,7 +310,7 @@ class CheckoutController extends Controller
                 [
                     'elements' => $this->projectElements($session),
                     'hold' => [
-                        'amountAuthorised' => $hold->amountMinor,
+                        'amountAuthorised' => $hold->amount->value,
                         'walletLabel' => $hold->walletLabel,
                     ],
                 ],
@@ -312,27 +334,28 @@ class CheckoutController extends Controller
      * in this controller: a session whose window has closed but whose row
      * has not yet been transitioned still reads `Open` and must not render.
      */
-    private function liveHold(CheckoutSessionModel $session): ?HoldDescription
+    private function liveHold(CheckoutSessionModel $session): ?PaymentIntentSnapshot
     {
         if (! $session->status instanceof Open || $session->isExpired() || ! $session->isHoldMode() || $session->payment_intent_ref === null) {
             return null;
         }
 
         $gateway = Payments::driver((string) ($session->meta['payment_method'] ?? ''));
+        $cart = Cart::query()->find((int) $session->cart_reference);
 
-        if (! $gateway instanceof SupportsPaymentHolds) {
+        if (! $gateway instanceof SupportsPaymentHolds || $cart === null) {
             return null;
         }
 
         try {
-            $description = $gateway->describeHold($session->payment_intent_ref);
+            $snapshot = $gateway->fetchIntent($cart, $session->payment_intent_ref);
         } catch (\Throwable $e) {
             report($e);
 
             return null;
         }
 
-        return $description?->status === PaymentIntentStatus::RequiresCapture ? $description : null;
+        return $snapshot?->status === PaymentIntentStatus::RequiresCapture ? $snapshot : null;
     }
 
     /**
@@ -490,7 +513,7 @@ class CheckoutController extends Controller
             'coupon' => $driver->getCoupon($session),
             // The pay boundary echoes back the fingerprint of the state the
             // customer confirmed (spec 0010 §E).
-            'fingerprint' => $driver->fingerprint($session),
+            'fingerprint' => $snapshot->fingerprint,
             'paymentMethods' => array_map(fn (PaymentMethod $method): array => [
                 'handle' => $method->handle(),
                 'label' => $method->label(),
@@ -991,7 +1014,7 @@ class CheckoutController extends Controller
             'renew' => ['sometimes', 'boolean'],
         ]);
 
-        $cart = Cart::query()->findOrFail((int) $session->cart_reference);
+        $cart = $this->freshCart($session);
 
         $method = $this->resolveAvailableMethod($methods, $cart, $data['payment_method']);
 
@@ -1013,9 +1036,9 @@ class CheckoutController extends Controller
         // Re-authorisation (payment change, or a hold the rail could not
         // stretch): release the old hold FIRST, so the customer is never
         // double-held. A void the gateway cannot confirm aborts the renewal.
-        if ($holdMode && ($data['renew'] ?? false) && $session->payment_intent_ref !== null && $gateway instanceof SupportsPaymentIntents) {
+        if ($holdMode && ($data['renew'] ?? false) && $session->payment_intent_ref !== null && $gateway instanceof ReconcilesPaymentIntents) {
             try {
-                $gateway->voidIntent($session->payment_intent_ref);
+                $gateway->voidIntent($cart, $session->payment_intent_ref);
             } catch (\Throwable $e) {
                 report($e);
 
@@ -1041,9 +1064,9 @@ class CheckoutController extends Controller
         if (! $holdMode && $session->isHoldMode() && $session->payment_intent_ref !== null) {
             $previousGateway = Payments::driver((string) ($session->meta['payment_method'] ?? ''));
 
-            if ($previousGateway instanceof SupportsPaymentIntents) {
+            if ($previousGateway instanceof ReconcilesPaymentIntents) {
                 try {
-                    $previousGateway->voidIntent($session->payment_intent_ref);
+                    $previousGateway->voidIntent($cart, $session->payment_intent_ref);
                 } catch (\Throwable $e) {
                     report($e);
 
@@ -1056,8 +1079,8 @@ class CheckoutController extends Controller
 
         try {
             $descriptor = $holdMode
-                ? $gateway->createHold($cart->calculate())
-                : $gateway->createIntent($cart->calculate());
+                ? $gateway->createHold($cart)
+                : $gateway->createIntent($cart);
         } catch (\Throwable $e) {
             // Gateway errors carry internals (Stripe's minimum-charge copy
             // links to its own docs); log the real one, say something human.
@@ -1116,7 +1139,7 @@ class CheckoutController extends Controller
 
         return response()->json([
             'intent' => $descriptor->reference,
-            'clientSecret' => $descriptor->clientSecret,
+            'clientSecret' => $descriptor->clientPayload['client_secret'] ?? null,
         ]);
     }
 
@@ -1143,7 +1166,7 @@ class CheckoutController extends Controller
             'payment_method' => ['required', 'string'],
         ]);
 
-        $cart = Cart::query()->findOrFail((int) $session->cart_reference);
+        $cart = $this->freshCart($session);
 
         $method = $this->resolveAvailableMethod($methods, $cart, $data['payment_method']);
 
@@ -1153,7 +1176,7 @@ class CheckoutController extends Controller
 
         // Live amount, not the session's pinned figure — the pin happens
         // inside assertReadyForPayment(), after this decision.
-        $amountTotal = $checkoutDriver->snapshot($session)->amountTotal;
+        $amountTotal = $cart->total?->value ?? 0;
 
         /*
          * The gateway intent was created when the payment form mounted, and
@@ -1162,17 +1185,28 @@ class CheckoutController extends Controller
          * customer is looking at BEFORE the pin, so a fingerprint rejection
          * costs nothing and a confirmed charge is never the stale figure.
          *
-         * A confirmed hold cannot be synced like an unconfirmed intent
-         * (Task 3 unit note: `$amountTotal` is Lunar minor units, equal to
-         * Stripe's for GBP): it stretches (incremental authorization) or it
-         * does not, so hold-mode sessions branch to adjustHold() instead of
+         * A confirmed hold cannot be synced like an unconfirmed intent: it
+         * stretches (incremental authorization) or it does not, so hold-mode
+         * sessions branch to adjustHold() instead of
          * SyncsPaymentIntents::syncIntent().
+         *
+         * A cart that left the session's currency is skipped: the gateway
+         * refuses to resize an intent in another currency, and step 0 of
+         * the gate below voids that intent and cancels the session anyway.
          */
-        if ($method->requiresIntent() && $amountTotal > 0) {
+        if ($method->requiresIntent() && $amountTotal > 0 && $cart->currency->code === $session->currency_code) {
             $gateway = Payments::driver($method->driver());
 
             if ($session->isHoldMode() && $gateway instanceof SupportsPaymentHolds && $session->payment_intent_ref !== null) {
-                $adjustment = $gateway->adjustHold($session->payment_intent_ref, $amountTotal);
+                try {
+                    $adjustment = $gateway->adjustHold($cart, $session->payment_intent_ref, new PriceValue($amountTotal, $cart->currency));
+                } catch (PaymentIntentException $e) {
+                    // A hold the gateway will not adjust (not this cart's,
+                    // no longer awaiting capture) cannot cover the total.
+                    report($e);
+
+                    $adjustment = HoldAdjustment::NeedsReauthorization;
+                }
 
                 if ($adjustment === HoldAdjustment::NeedsReauthorization) {
                     // Session still Open: nothing to unpin. The client
@@ -1183,9 +1217,15 @@ class CheckoutController extends Controller
                     ]);
                 }
             } elseif ($gateway instanceof SyncsPaymentIntents) {
-                $gateway->syncIntent(
-                    Cart::query()->findOrFail((int) $session->cart_reference)->calculate(),
-                );
+                try {
+                    $gateway->syncIntent($cart);
+                } catch (PaymentIntentException $e) {
+                    report($e);
+
+                    throw ValidationException::withMessages([
+                        'payment_method' => 'Card payments are unavailable right now. Please try again in a moment.',
+                    ]);
+                }
             }
         }
 
@@ -1219,9 +1259,9 @@ class CheckoutController extends Controller
                 if ($session->isHoldMode() && $session->payment_intent_ref !== null) {
                     $holdGateway = Payments::driver((string) ($session->meta['payment_method'] ?? ''));
 
-                    if ($holdGateway instanceof SupportsPaymentIntents) {
+                    if ($holdGateway instanceof ReconcilesPaymentIntents) {
                         try {
-                            $holdGateway->voidIntent($session->payment_intent_ref);
+                            $holdGateway->voidIntent($cart, $session->payment_intent_ref);
                         } catch (\Throwable $e) {
                             report($e);
                         }
@@ -1416,6 +1456,26 @@ class CheckoutController extends Controller
     }
 
     /**
+     * Whether Stripe sent the customer back from a redirect payment method
+     * that did not go through. StripeCard.vue gives Stripe this page as its
+     * `return_url`, and Stripe appends the intent it was confirming and how
+     * the redirect ended. Only a failure for the session's own intent
+     * counts. These are the only gateway parameters the controller reads,
+     * and they grant nothing new: the session's owner can already ask for
+     * the same release through releasePayment().
+     *
+     * Stripe's return_url documentation lists `payment_intent` but not
+     * `redirect_status`, which it sends all the same. A return without it
+     * is not treated as a failure: the session waits for reconciliation.
+     */
+    private function returnedFromFailedRedirect(Request $request, CheckoutSessionModel $session): bool
+    {
+        return $request->query('redirect_status') === 'failed'
+            && $session->payment_intent_ref !== null
+            && $request->query('payment_intent') === $session->payment_intent_ref;
+    }
+
+    /**
      * Customer-facing copy for a rejected pay attempt. The exception message
      * carries the developer reason code ("Payment confirmation rejected
      * [fingerprint_mismatch]."), which is for logs, not for the customer.
@@ -1430,6 +1490,19 @@ class CheckoutController extends Controller
             'contact_required' => 'Enter your email address so we can send your order confirmation, then try again.',
             default => 'The payment could not be started. Refresh the page and try again.',
         };
+    }
+
+    /**
+     * The session's cart with totals from the pipeline, not the persisted
+     * snapshot: method availability, payment guards and the gateway amount
+     * are all money decisions, and the pin that follows uses fresh totals.
+     */
+    private function freshCart(CheckoutSessionModel $session): Cart
+    {
+        return Cart::query()
+            ->with('lines.purchasable')
+            ->findOrFail((int) $session->cart_reference)
+            ->recalculate();
     }
 
     /**

@@ -386,10 +386,15 @@ second order, and the synchronous path creates or adopts it inside `complete()`:
    `Open`, so a session reopened mid-completion is never completed. Under the
    same lock, money stays put when the session was re-pinned against another
    intent meanwhile, or when the gateway's own `authorize()` placed an order
-   for the cart since the pin (the failure came after placement): that records
-   an attempt and stalls to the operator instead. An attempt is only counted
-   while the session is still `PaymentProcessing`, and before any listener
-   runs. Residual: a gateway that places the order in its own transaction
+   for this payment (the failure came after placement): that records an
+   attempt and stalls to the operator instead. An order counts as placed for
+   this payment when the gateway announced it for the session's current intent
+   (the success listener notes the order and the intent on the session before
+   it pins or completes, because a session pinned by that announcement is
+   pinned after the order was placed), or when it was placed since the pin. An
+   order an earlier checkout of the same cart placed is neither. An attempt is
+   only counted while the session is still `PaymentProcessing`, and before any
+   listener runs. Residual: a gateway that places the order in its own transaction
    without touching the session row (Stripe's `authorize()` does) can still
    commit that placement while the refund is in flight, so "never refunded"
    holds against checkout's own completion, not against every gateway's. `CheckoutCompletionFailed`
@@ -411,9 +416,17 @@ second order, and the synchronous path creates or adopts it inside `complete()`:
      attempts fire `CheckoutSessionReconciliationStalled`.
      `CheckoutCompletionFailed` fires with a `reason` distinguishing
      **refunded / refund-pending / refund-failed**, carrying the refund
-     reference when one exists. A non-Lunar driver may substitute its own
-     remediation (a backorder, a manual-review hold) but MUST NOT silently
-     retain a charge that produced no order.
+     reference when one exists. A gateway keeps reporting a refunded intent as
+     captured (a Stripe intent stays `succeeded`), so every pass reads the
+     intent snapshot's refunded amount before it completes anything. A fully
+     refunded intent means an earlier pass returned the money and never
+     committed the reopen (it died after the refund, or the gateway's answer
+     was lost): the session moves `→ Open` with `refunded` and no reference,
+     without a second refund call. A partly refunded intent was refunded by
+     someone else and still holds money with no order, so it records an attempt
+     and stalls to the operator. Neither is ever completed. A non-Lunar driver
+     may substitute its own remediation (a backorder, a manual-review hold) but
+     MUST NOT silently retain a charge that produced no order.
    - **The draft survives, unplaced.** Neither a void nor a refund touches the
      order the pin drafted: it stays on the cart with `placed_at` null and no
      session points at it. The next Pay on the reopened session reuses that same
@@ -476,9 +489,10 @@ exists, is voided **before** the terminal transition, and an unabortable /
 unknown-outcome void blocks the terminal transition exactly as above.
 
 Every intent operation in §E.2/§F — fetch, void, refund — goes through the new
-core gateway capability interface `Lunar\Core\Contracts\SupportsPaymentIntents`
-(`fetchIntent(string $ref)`, `voidIntent(string $ref)`, `refundIntent(string
-$ref, int $amount, string $idempotencyKey)`), `instanceof`-checked on the
+core gateway capability interface `Lunar\Core\Contracts\ReconcilesPaymentIntents`
+(`fetchIntent(Cart $cart, string $reference)`, `voidIntent(Cart $cart, string
+$reference)`, `refundIntent(Cart $cart, string $reference, PriceValue $amount,
+string $idempotencyKey)`), `instanceof`-checked on the
 gateway driver ([[0002-payment-methods-and-driver]] carries the seam detail). A
 gateway that does not implement it cannot void — its session stays
 `PaymentProcessing` and resolves through the stall protocol below.
@@ -491,7 +505,21 @@ aged on `payment_processing_at`, §A) and **forces reconciliation** through the
 gateway driver: `fetchIntent` → §E.2 (complete / refund) or void → `Open`
 (return-path hygiene, §E.2). Each run increments `reconciliation_attempts`; a
 still-pending intent on a slow method (bank transfer, voucher) **reschedules
-without consuming an attempt**, up to a method-declared deadline. After the
+without consuming an attempt**, up to a method-declared deadline. An intent
+still **waiting on the customer** (a declined card, an abandoned challenge, an
+async method that failed back to "pick another method") never settles on its
+own, so it is pending only for `reconciliation.requires_action_minutes`
+(default 30, aged on `payment_processing_at`); past that the intent is
+**voided first** and the session then returns to `Open` with the reference
+cleared (return-path hygiene, §E.2), no attempt consumed and no event, so the
+customer retries on a fresh intent. The void is what makes the reopen safe: an
+intent left confirmable could take a payment after the session reopened, when
+the sweep no longer watches it and a retry would mint a second intent. A void
+the gateway refuses (the payment went through between the fetch and the void)
+leaves the session `PaymentProcessing` and consumes an attempt, so the next
+pass settles on the real status, and a void that keeps failing stalls. The
+customer-initiated release is the exception that keeps the intent: the customer
+is on the page with the payment element still bound to it. After the
 maximum attempts the session is **stalled**:
 `CheckoutSessionReconciliationStalled` fires **once** (never per-run noise),
 and the session drops to a **low-frequency retry tier** — not silence. The
@@ -502,6 +530,19 @@ against a stalled session's cart returns `409` with a `stalled` reason code
 until one of those exits applies. Retention pruning anchors on the terminal
 timestamps (`completed_at` / `cancelled_at` / `expires_at`); a stalled session
 is pruned only after it reaches a terminal state through a sanctioned exit.
+
+**Return from a failed redirect.** A redirect payment method (Klarna, PayPal, a
+full-page 3DS challenge) that fails or is cancelled sends the customer back to
+the session URL with the session still pinned, and the in-page release never
+ran because the browser had left the page. When that request carries Stripe's
+`redirect_status=failed` for the session's own `payment_intent`, the session
+page runs the customer-initiated release before it renders: `→ Open` with the
+intent kept, only on the gateway's word that nothing was captured (a captured
+intent resolves through §E.2 instead), then a redirect to the retry state.
+Without those parameters the session waits out the window above. Stripe's
+return URL documentation lists `payment_intent` but not `redirect_status`, so
+the shortcut depends on a parameter Stripe sends without documenting it, and
+its absence only costs the wait.
 
 ### F.2 One active session per cart
 
@@ -572,7 +613,7 @@ states (`Expired`, etc.); the table does not duplicate those.
   `src/DataObjects/` (`Lunar\Checkout\DataObjects\…`).
 - **Driver surface:** the §B verbs added to `CheckoutDriver`, plus the mandatory
   `AbstractCheckoutDriver` base class (§B). New core gateway capability
-  interface `Lunar\Core\Contracts\SupportsPaymentIntents` (§F).
+  interface `Lunar\Core\Contracts\ReconcilesPaymentIntents` (§F).
 - **Session API:** `hasDrifted()`, `putElementData()` / `getElementData()`.
 - **Actions:** `SyncCheckoutSession` (guarded single-statement re-sync while
   `Open`, §D), `InvalidateCheckoutSession` (void-first → `Cancelled` + reason,
@@ -757,6 +798,6 @@ states (`Expired`, etc.); the table does not duplicate those.
 - `Lunar\Core\Models\Cart::setShippingAddress()` / `setBillingAddress()` /
   `setShippingOption()`,
   `Lunar\Core\Validation\Cart\ValidateCartForOrderCreation`,
-  `Lunar\Core\Contracts\SupportsPaymentIntents` (new, §F). Core's
+  `Lunar\Core\Contracts\ReconcilesPaymentIntents` (new, §F). Core's
   `Cart::fingerprint()` / `checkFingerprint()` / `GeneratesFingerprint` dedupe
   machinery is explicitly **not** a dependency (§D).

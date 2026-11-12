@@ -342,17 +342,6 @@ composer test          # pest + phpstan
 vendor/bin/pint        # code style
 ```
 
-While Lunar v2 is in alpha, `lunarphp/core` on Packagist can lag behind the
-contracts this package builds against. To test against a local monorepo
-checkout, point Composer at it (not committed, both paths are local to you):
-
-```bash
-composer config repositories.lunar '{"type":"path","url":"../lunar/packages/core","options":{"symlink":true}}'
-composer require "lunarphp/core:2.x-dev" -W
-```
-
-Revert with `git checkout -- composer.json && composer update lunarphp/core`.
-
 ### Known follow-ups
 
 - The suite runs serially in CI. Two files reach for helpers and fake gateway

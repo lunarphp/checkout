@@ -28,13 +28,14 @@ final class InvalidateCheckoutSession implements InvalidatesCheckoutSession
     {
         if ($reference = $session->payment_intent_ref) {
             $gateway = $this->gateways->for($session);
+            $cart = $this->gateways->cartFor($session);
 
-            if ($gateway === null) {
+            if ($gateway === null || $cart === null) {
                 return false;
             }
 
             try {
-                $gateway->voidIntent($reference);
+                $gateway->voidIntent($cart, $reference);
             } catch (\Throwable) {
                 // Unknown outcome is not a void — the charge may still land.
                 return false;

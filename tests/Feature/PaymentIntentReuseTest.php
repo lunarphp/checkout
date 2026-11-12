@@ -14,6 +14,7 @@ use Lunar\Core\Models\Cart;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\WithoutIntentReconciliation;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -23,9 +24,11 @@ uses(TestCase::class, RefreshDatabase::class);
  */
 class ReusedIntentGateway extends OfflinePayment implements CreatesPaymentIntents
 {
+    use WithoutIntentReconciliation;
+
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
-        return new PaymentIntentDescriptor('pi_reused_'.$cart->id, 'secret_'.$cart->id);
+        return new PaymentIntentDescriptor('pi_reused_'.$cart->id, clientPayload: ['client_secret' => 'secret_'.$cart->id]);
     }
 }
 
@@ -62,6 +65,21 @@ function registerReusedIntentGateway(): void
     Payments::extend('reused-intents', fn () => app(ReusedIntentGateway::class));
     app(PaymentMethodRegistry::class)->add(ReusedIntentMethod::class);
 }
+
+it('hands the browser the intent reference and the client secret from the gateway payload', function () {
+    registerReusedIntentGateway();
+
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = CheckoutCart::session($cart);
+
+    $this->postJson(route('lunar.checkout.payment-intent.store', $session->uuid), [
+        'payment_method' => 'reused-card',
+    ])->assertOk()->assertExactJson([
+        'intent' => 'pi_reused_'.$cart->id,
+        'clientSecret' => 'secret_'.$cart->id,
+    ]);
+});
 
 it('lets a successor session take over the intent reference a dead session still holds', function () {
     registerReusedIntentGateway();

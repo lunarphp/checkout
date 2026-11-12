@@ -28,7 +28,7 @@ class PickupPointModifier extends ShippingModifier
         }
 
         foreach (app(ShippingManifest::class)->options as $option) {
-            if ($option instanceof ShippingOption && $option->collect) {
+            if ($option instanceof ShippingOption && $option->pickup) {
                 $option->meta = array_merge($option->meta ?? [], [PickupPoints::POINT_KEY => $point]);
             }
         }

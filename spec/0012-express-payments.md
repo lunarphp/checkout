@@ -42,11 +42,11 @@ session state. The state machine tracks money-safety states, not UI location.
 
 ### A. `SupportsPaymentHolds` (core capability)
 
-New opt-in contract in `lunar/core` beside `CreatesPaymentIntents` / `SupportsPaymentIntents` /
+New opt-in contract in `lunar/core` beside `CreatesPaymentIntents` / `ReconcilesPaymentIntents` /
 `SyncsPaymentIntents`, checked via `instanceof`, never a required part of `PaymentType`:
 
 ```php
-interface SupportsPaymentHolds
+interface SupportsPaymentHolds extends ReconcilesPaymentIntents
 {
     /**
      * Create (or resume) the cart's authorise-only intent: capture deferred,
@@ -60,19 +60,19 @@ interface SupportsPaymentHolds
      * hold now covers it; NeedsReauthorization when this hold cannot stretch
      * (the customer re-opens the wallet for a fresh authorisation).
      */
-    public function adjustHold(string $reference, int $amountMinor): HoldAdjustment;
+    public function adjustHold(Cart $cart, string $reference, PriceValue $amount): HoldAdjustment;
 
     /**
      * Capture an authorised hold for the final amount (<= authorised).
      * Idempotent per reference. MUST throw when the gateway cannot confirm
      * the capture; an unknown outcome is not a capture.
      */
-    public function captureHold(string $reference, int $amountMinor): void;
+    public function captureHold(Cart $cart, string $reference, PriceValue $amount): void;
 }
 ```
 
 - `HoldAdjustment` is an enum: `Ok | NeedsReauthorization`.
-- Releasing a hold is the existing `SupportsPaymentIntents::voidIntent()`; no new verb.
+- Releasing a hold is the existing `ReconcilesPaymentIntents::voidIntent()`; no new verb.
 - **Express eligibility** = `$method->supportsExpress() && $driver instanceof SupportsPaymentHolds
   && $method->isAvailable($cart)`. A gateway that cannot hold cannot be express; the squeeze
   page's "not charged until you confirm" promise is only honest with a hold.
@@ -165,7 +165,10 @@ session whose intent is hold-flavoured:
 1. Total above authorised: `adjustHold`, BEFORE the pin (where the standard flow syncs its
    intent amount; a confirmed hold's amount cannot be edited, so holds adjust instead of
    syncing). `NeedsReauthorization` is a structured 422 with the session still `Open`:
-   nothing to unpin, the UI opens the re-open-wallet panel.
+   nothing to unpin, the UI opens the re-open-wallet panel. A hold the gateway refuses to
+   adjust at all (a `PaymentIntentException`: not this cart's, or no longer awaiting
+   capture) is reported and gets the same 422. A cart that has left the session's currency
+   skips the adjustment, because gate step 0 voids the hold and cancels the session.
 2. Fingerprint pin, exactly as the standard flow (the squeeze page echoes the fingerprint it
    rendered; any drift is the existing `fingerprint_mismatch` 422). `Open ->
    PaymentProcessing`; the client is sent to the existing `processing` URL.

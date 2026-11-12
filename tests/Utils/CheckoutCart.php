@@ -95,7 +95,7 @@ class CheckoutCart
             identifier: $collect ? 'collection' : 'standard',
             price: new PriceValue(0, $currency),
             taxClass: $taxClass,
-            collect: $collect,
+            pickup: $collect,
         );
 
         ShippingManifest::addOption($option);
@@ -142,6 +142,41 @@ class CheckoutCart
             'purchasable_id' => $variant->id,
             'quantity' => 1,
         ]);
+
+        return $cart->refresh();
+    }
+
+    /**
+     * The shopper switched currency after the session pinned its own: the
+     * cart moves to `$code`, priced there, while the session keeps the old one.
+     */
+    public static function changeCurrency(Cart $cart, string $code): Cart
+    {
+        $currency = Currency::factory()->createQuietly(['code' => $code, 'default' => false, 'decimal_places' => 2]);
+
+        foreach ($cart->lines()->get() as $line) {
+            Price::factory()->create([
+                'price' => 1000,
+                'min_quantity' => 1,
+                'currency_id' => $currency->id,
+                'priceable_type' => $line->purchasable_type,
+                'priceable_id' => $line->purchasable_id,
+            ]);
+        }
+
+        $options = ShippingManifest::getOptions($cart)->map(fn (ShippingOption $option) => new ShippingOption(
+            name: $option->name,
+            description: $option->description,
+            identifier: $option->identifier,
+            price: new PriceValue($option->price->value, $currency),
+            taxClass: $option->taxClass,
+            pickup: $option->pickup,
+        ));
+
+        ShippingManifest::clearOptions();
+        ShippingManifest::addOptions($options);
+
+        $cart->update(['currency_id' => $currency->id]);
 
         return $cart->refresh();
     }

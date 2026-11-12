@@ -130,7 +130,7 @@ the configured validators and `recalculate()`:
 | Element | Write path |
 |---------|-----------|
 | `ContactInformation` | `$context->storeContact($validated)` → (driver) `storeContact` — guest email/phone ([[0010-cart-session-reconciliation]] §B); contact is **not** an address write |
-| `AddressElement` | `$context->storeShippingAddress($validated)` / `storeBillingAddress($validated)` → (driver) → `Cart::setShippingAddress()` / `setBillingAddress()` (→ `AddAddress` action, `lunar.cart.validators.add_address`, tax-zone clear, recalc) |
+| `AddressElement` | `$context->storeShippingAddress($validated)` / `storeBillingAddress($validated)` → (driver) → `Cart::setShippingAddress()` / `setBillingAddress()` (→ `AddAddress` action, the `StepList::AddAddressValidation` steps, tax-zone clear, recalc) |
 | `ShippingOptionsElement` | `$context->setShippingOption($identifier)` → (driver) resolves via `ShippingManifest::getOption($cart, $identifier)` → `Cart::setShippingOption($option)` (→ `SetShippingOption` action + validator + recalc); persists identifier only |
 
 Direct `fill()->save()` is forbidden: it bypasses the validators and the recalculation, letting

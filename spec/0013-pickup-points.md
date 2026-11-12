@@ -14,11 +14,11 @@
 Click and collect works end to end in Lunar core and stops one step short in this package.
 
 **What core already does.** A collect order is any order whose shipping line carries
-`meta.collect = true`. The `collection` shipping driver returns a `ShippingOption` with
-`collect: true` and a `meta` array; `Pipelines\Order\Creation\CreateShippingLine` merges that
-meta (plus the `collect` flag) onto the shipping order line; `FulfilmentMethods\Collection`
+`meta.pickup = true`. The `pickup` shipping driver returns a `ShippingOption` with
+`pickup: true` and a `meta` array; `Pipelines\Order\Creation\CreateShippingLine` merges that
+meta (plus the `pickup` flag) onto the shipping order line; `FulfilmentMethods\Pickup`
 claims the order's physical lines by reading exactly that array and runs
-Pending → Ready for collection → Collected; `ValidateCartForOrderCreation` waives the
+Pending → Ready for pickup → Picked up; `ValidateCartForOrderCreation` waives the
 shipping-address requirement for a collect option. `FillOrderFromCart` also copies `cart.meta`
 onto `orders.meta`, and every shipping driver receives the cart in its `ShippingOptionRequest`.
 None of this knows *where* the customer collects from, and none of it needs to: with no pickup
@@ -41,7 +41,7 @@ locations defined, an order simply is a collection order.
    is dropped by `LunarCheckoutDriver::getShippingOptions()` and never reaches the client.
 4. **The panel cannot tell a collect order apart** beyond the fulfilment card's method badge.
    `OrderShowController::shippingOption()` reads the breakdown item, which carries neither
-   `collect` nor meta.
+   `pickup` nor meta.
 
 ## Proposal
 
@@ -134,7 +134,7 @@ public function execute(Cart $cart, string $mode, ?string $pickupPoint = null): 
 Behaviour:
 
 - `mode = 'collect'`: write `meta.fulfilment`. If a shipping address row exists, resolve the
-  cart's collect option through `ShippingManifest::getOptions($cart)->firstWhere('collect', true)`
+  cart's collect option through `ShippingManifest::getOptions($cart)->firstWhere('pickup', true)`
   and store it via `$cart->setShippingOption()` (a collect-capable cart always has exactly one;
   a cart with none keeps its current option and the projection says collect is unavailable).
   Then apply the point: the given handle if valid, else the single point if the provider offers
@@ -187,7 +187,7 @@ public function handle(Cart $cart, Closure $next): mixed
 
     if (is_array($point)) {
         foreach (app(ShippingManifest::class)->options as $option) {
-            if ($option->collect) {
+            if ($option->pickup) {
                 $option->meta = array_merge($option->meta ?? [], ['pickup_point' => $point]);
             }
         }
@@ -199,18 +199,19 @@ public function handle(Cart $cart, Closure $next): mixed
 
 That is the whole write path. `ShippingManifest::getOption()` re-resolves the option from the
 cart at order creation, `CreateShippingLine` stamps the meta onto the shipping line, and the
-placed order carries `order_lines(shipping).meta = {collect: true, …, pickup_point}`. It
+placed order carries `order_lines(shipping).meta = {pickup: true, …, pickup_point}`. It
 works for any collect-capable driver, including a static `ShippingManifest::addOption()`, so the
 package's own tests can assert the line meta without table-rate-shipping. The checkout package
 does not touch the order and `OrderPlacing` listeners are not involved.
 `orders.meta.pickup_point` also arrives via `FillOrderFromCart`; the shipping line copy is
-the normative one, because that is where `collect` lives and what the fulfilment method reads.
+the normative one, because that is where `pickup` lives and what the fulfilment method reads.
 
 ### D. Validation through Lunar's seam
 
 `Validation\Cart\PickupPointRequired extends Lunar\Core\Validation\BaseValidator`,
-appended by `CheckoutServiceProvider::register()` to `lunar.cart.validators.order_create`
-after core's `ValidateCartForOrderCreation`:
+appended in `CheckoutServiceProvider::boot()` with
+`Steps::for(StepList::OrderCreateValidation)->append(...)`, after core's
+`ValidateCartForOrderCreation`:
 
 - fail on `fulfilment` when `meta.fulfilment` and the stored option disagree (collect mode
   with a non-collect option, or the reverse), which is only reachable by a writer that bypassed
@@ -299,14 +300,14 @@ The host owns that endpoint's route and auth; the action is the reuse boundary.
 ### H. Panel (sibling change: `panel`)
 
 `OrderShowController::shippingOption()` reads the shipping line in both branches and adds
-`collect: bool` and `pickup_point: ?{handle, name, lines}` from `$line->meta`. The order
-screen's Shipping section swaps the truck icon for the store icon when `collect` is true and
+`pickup: bool` and `pickup_point: ?{handle, name, lines}` from `$line->meta`. The order
+screen's Shipping section swaps the truck icon for the store icon when `pickup` is true and
 renders "Collect from {name}" with the lines beneath the method name. Nothing else changes:
 the fulfilment card already badges the method and drives its states; `location` stays the stock
 location, which is a different concept from the pickup point and deliberately not conflated.
 
 The order's shipping address on a collect order is the customer's own address (§F.1). Anything
-that renders it as "Delivery address", in this panel or in a host, must check `collect` first
+that renders it as "Delivery address", in this panel or in a host, must check `pickup` first
 and say so. The panel's Shipping address section is relabelled "Customer address" when the
 shipping line collects.
 
@@ -330,14 +331,14 @@ Package (feature, alongside the existing checkout suite):
 - express start response carries the three keys; squeeze page confirm in collect mode with a
   point places the order with the point on the line.
 
-`panel`: `OrderShowController` exposes `collect` and `pickup_point` for a collect order and
-`collect: false` for a delivery order.
+`panel`: `OrderShowController` exposes `pickup` and `pickup_point` for a collect order and
+`pickup: false` for a delivery order.
 
 ## Out of scope
 
 - Offline / pay-later for collect orders. `PaymentMethods\Offline` already exists as the
   mechanism; when it is wanted, the host registers it with an `appliesTo()` that reads the
-  stored option's `collect` flag, exactly as its docblock illustrates. The decision for the
+  stored option's `pickup` flag, exactly as its docblock illustrates. The decision for the
   first storefront is that offline payment belongs to on-account orders, which are a separate
   piece of work.
 - Per-point availability (stock at a branch, opening hours, cut-offs). The provider gets the

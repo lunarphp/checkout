@@ -21,7 +21,7 @@ namespace Lunar\Checkout\PaymentMethods;
  *
  *         public function isAvailable(Cart $cart): bool
  *         {
- *             return (bool) $cart->getShippingOption()?->collect;
+ *             return (bool) $cart->getShippingOption()?->pickup;
  *         }
  *     }
  */

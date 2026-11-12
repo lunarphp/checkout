@@ -12,7 +12,7 @@ Pick up the Lunar checkout-session work. Context:
   `active_cart_reference` unique-column concurrency; single-statement guarded session writes
   (guarded-transition helper = concurrency layer, spatie machine = legality layer); gate step 0
   (currency/channel); sync-path gate inside `complete()`'s order transaction; the
-  `SupportsPaymentIntents` core capability seam; stall protocol + operator resolve; renames
+  `ReconcilesPaymentIntents` core capability seam; stall protocol + operator resolve; renames
   (`hasDrifted()`, `scopeExpirable`, `cancelled_at`, `config('lunar.checkout.driver')`); zero-total
   carts force the sync path; package home pinned to `packages/checkout` (`Lunar\Checkout\…`).
 - **Implementation: session-core slice LANDED (2026-06-12).** Everything in the Rework/Add lists
@@ -51,7 +51,7 @@ Pick up the Lunar checkout-session work. Context:
   so the driver can't resolve it.
 - `tests/checkout/Unit/ArchitectureTest.php` — mirror core's arch rules (actions implement a
   contract, expose `execute()`, no facade imports).
-- Core `SupportsPaymentIntents` interface (`packages/core` — small, additive:
+- Core `ReconcilesPaymentIntents` interface (`packages/core`, small and additive:
   fetchIntent/voidIntent/refundIntent).
 - `AbstractCheckoutDriver` base class (mandatory for third-party drivers).
 - The guarded-transition helper (single-statement guarded UPDATEs over the spatie machine).

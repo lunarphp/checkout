@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Exceptions;
 use Lunar\Checkout\Contracts\PaymentMethodRegistry;
@@ -13,10 +14,10 @@ use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
-use Lunar\Core\DataObjects\HoldDescription;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\HoldAdjustment;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
@@ -27,6 +28,8 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FailingOrderCreationStep;
+use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -37,7 +40,7 @@ uses(TestCase::class, RefreshDatabase::class);
  * doesn't need to (it only asserts driver behaviour) but the hold-routing
  * assertions here do.
  */
-class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, SupportsPaymentHolds, SupportsPaymentIntents
+class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, SupportsPaymentHolds
 {
     /** @var array<int, int> */
     public static array $createIntentCalls = [];
@@ -48,10 +51,13 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
     /** @var array<int, string> */
     public static array $voidedReferences = [];
 
-    /** @var array<int, array{reference: string, amount: int, unplaced_orders: array<int, int>}> */
+    /** @var array<int, array{cart: int, reference: string, amount: int, currency: string}> */
+    public static array $adjustCalls = [];
+
+    /** @var array<int, array{cart: int, reference: string, amount: int, currency: string, unplaced_orders: array<int, int>}> */
     public static array $captureCalls = [];
 
-    /** @var array<int, array{reference: string, amount: int, unplaced_orders: array<int, int>}> */
+    /** @var array<int, array{reference: string, amount: int, currency: string}> */
     public static array $refundCalls = [];
 
     public static int $holdSequence = 0;
@@ -64,12 +70,19 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
 
     public static bool $throwOnVoid = false;
 
+    public static bool $throwOnAdjust = false;
+
     /**
-     * Verified against by the confirm-page guard: null (the default) means
-     * "gateway doesn't recognise this reference", exactly like a real driver
-     * would answer for a non-hold or unknown reference.
+     * Answers for successive fetches, taken ahead of `$fetchStatus`. Null is
+     * a reference the gateway did not create for the cart.
+     *
+     * @var array<int, ?PaymentIntentStatus>
      */
-    public static ?HoldDescription $describeOutcome = null;
+    public static array $fetchScript = [];
+
+    public static int $holdAmount = 0;
+
+    public static ?string $walletLabel = null;
 
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
@@ -85,35 +98,45 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
         return new PaymentIntentDescriptor('hold_fake_'.$cart->id.'_'.(++static::$holdSequence));
     }
 
-    public function describeHold(string $reference): ?HoldDescription
+    public function adjustHold(Cart $cart, string $reference, PriceValue $amount): HoldAdjustment
     {
-        return static::$describeOutcome;
-    }
+        if (static::$throwOnAdjust) {
+            throw new PaymentIntentException('fake gateway refused to adjust the hold');
+        }
 
-    public function adjustHold(string $reference, int $amountMinor): HoldAdjustment
-    {
+        static::$adjustCalls[] = [
+            'cart' => $cart->id,
+            'reference' => $reference,
+            'amount' => $amount->value,
+            'currency' => $amount->resolveCurrency()->code,
+        ];
+
         return static::$adjustOutcome;
     }
 
-    public function captureHold(string $reference, int $amountMinor): void
+    public function captureHold(Cart $cart, string $reference, PriceValue $amount): void
     {
         if (static::$throwOnCapture) {
             throw new PaymentIntentException('fake gateway capture failed');
         }
 
         static::$captureCalls[] = [
+            'cart' => $cart->id,
             'reference' => $reference,
-            'amount' => $amountMinor,
+            'amount' => $amount->value,
+            'currency' => $amount->resolveCurrency()->code,
             'unplaced_orders' => Order::query()->whereNull('placed_at')->pluck('id')->all(),
         ];
     }
 
-    public function fetchIntent(string $reference): PaymentIntentStatus
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
-        return static::$fetchStatus;
+        $status = static::$fetchScript === [] ? static::$fetchStatus : array_shift(static::$fetchScript);
+
+        return $status ? FakeIntents::snapshot($cart, $status, static::$holdAmount, static::$walletLabel) : null;
     }
 
-    public function voidIntent(string $reference): void
+    public function voidIntent(Cart $cart, string $reference): void
     {
         if (static::$throwOnVoid) {
             throw new PaymentIntentException('fake gateway void failed');
@@ -122,9 +145,9 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
         static::$voidedReferences[] = $reference;
     }
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
-        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amountMinor];
+        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amount->value, 'currency' => $amount->resolveCurrency()->code];
 
         return new PaymentRefund(success: true, reference: 'refund_fake_'.$reference);
     }
@@ -132,19 +155,18 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
 
 /**
  * A gateway that can only create standard intents, no hold capability, the
- * way most drivers will stay. Also implements {@see SupportsPaymentIntents}
- * (fetch/void/refund) so it doubles as the "hold mode flagged on a session
+ * way most drivers will stay. Its fetch/void/refund double as the "hold mode flagged on a session
  * whose driver never actually supports holds" misconfiguration fixture: a
  * hold-mode session pinned against this gateway reaches completeOrRefund()
  * with an intent-capable-but-not-hold-capable driver, exercising the flavour
  * branch that must void rather than refund an uncaptured hold.
  */
-class IntentOnlyGateway extends OfflinePayment implements CreatesPaymentIntents, SupportsPaymentIntents
+class IntentOnlyGateway extends OfflinePayment implements CreatesPaymentIntents
 {
     /** @var array<int, string> */
     public static array $voidedReferences = [];
 
-    /** @var array<int, array{reference: string, amount: int, unplaced_orders: array<int, int>}> */
+    /** @var array<int, array{reference: string, amount: int, currency: string}> */
     public static array $refundCalls = [];
 
     public static PaymentIntentStatus $fetchStatus = PaymentIntentStatus::RequiresCapture;
@@ -154,19 +176,19 @@ class IntentOnlyGateway extends OfflinePayment implements CreatesPaymentIntents,
         return new PaymentIntentDescriptor('pi_intent_only_'.$cart->id);
     }
 
-    public function fetchIntent(string $reference): PaymentIntentStatus
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
-        return static::$fetchStatus;
+        return FakeIntents::snapshot($cart, static::$fetchStatus);
     }
 
-    public function voidIntent(string $reference): void
+    public function voidIntent(Cart $cart, string $reference): void
     {
         static::$voidedReferences[] = $reference;
     }
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
-        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amountMinor];
+        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amount->value, 'currency' => $amount->resolveCurrency()->code];
 
         return new PaymentRefund(success: true, reference: 'refund_intent_only_'.$reference);
     }
@@ -363,6 +385,7 @@ beforeEach(function () {
     FakeHoldGateway::$createIntentCalls = [];
     FakeHoldGateway::$createHoldCalls = [];
     FakeHoldGateway::$voidedReferences = [];
+    FakeHoldGateway::$adjustCalls = [];
     FakeHoldGateway::$captureCalls = [];
     FakeHoldGateway::$refundCalls = [];
     FakeHoldGateway::$holdSequence = 0;
@@ -370,7 +393,10 @@ beforeEach(function () {
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
     FakeHoldGateway::$throwOnCapture = false;
     FakeHoldGateway::$throwOnVoid = false;
-    FakeHoldGateway::$describeOutcome = null;
+    FakeHoldGateway::$throwOnAdjust = false;
+    FakeHoldGateway::$fetchScript = [];
+    FakeHoldGateway::$holdAmount = 0;
+    FakeHoldGateway::$walletLabel = null;
     IntentOnlyGateway::$voidedReferences = [];
     IntentOnlyGateway::$refundCalls = [];
     IntentOnlyGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
@@ -495,6 +521,46 @@ it('adjusts the hold before pinning and rejects with NeedsReauthorization while 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
 });
 
+it('asks for a fresh authorisation when the gateway refuses to adjust the hold', function () {
+    Exceptions::fake();
+    $session = mintHoldSession();
+    FakeHoldGateway::$throwOnAdjust = true;
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'fake',
+        'fingerprint' => CheckoutCart::fingerprint($session),
+    ])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.hold.0', 'hold_reauthorization_required');
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->meta['payment_handle'] ?? null)->toBeNull();
+
+    Exceptions::assertReported(PaymentIntentException::class);
+});
+
+it('cancels a hold session whose cart changed currency instead of asking the gateway to adjust the hold', function () {
+    Exceptions::fake();
+    $session = mintHoldSession();
+    $hold = $session->payment_intent_ref;
+    FakeHoldGateway::$throwOnAdjust = true;
+
+    CheckoutCart::changeCurrency(Cart::query()->findOrFail((int) $session->cart_reference), 'EUR');
+
+    $this->postJson(route('lunar.checkout.pay', $session->uuid), [
+        'payment_method' => 'fake',
+        'fingerprint' => CheckoutCart::fingerprint($session),
+    ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrorFor('fingerprint');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Cancelled::class)
+        ->and($session->meta['invalidation_reason'] ?? null)->toBe('context_diverged')
+        ->and(FakeHoldGateway::$voidedReferences)->toBe([$hold]);
+});
+
 it('pins a hold session and reconcile captures then completes', function () {
     $session = mintHoldSession();
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
@@ -510,8 +576,18 @@ it('pins a hold session and reconcile captures then completes', function () {
 
     $this->get(route('lunar.checkout.processing', $session->uuid));
 
-    expect(FakeHoldGateway::$captureCalls)->toHaveCount(1)
-        ->and(FakeHoldGateway::$captureCalls[0]['amount'])->toBe($session->refresh()->amount_total)
+    $session->refresh();
+
+    $expected = [
+        'cart' => (int) $session->cart_reference,
+        'reference' => $session->payment_intent_ref,
+        'amount' => $session->amount_total,
+        'currency' => $session->currency_code,
+    ];
+
+    expect(FakeHoldGateway::$adjustCalls)->toBe([$expected])
+        ->and(FakeHoldGateway::$captureCalls)->toHaveCount(1)
+        ->and(Arr::except(FakeHoldGateway::$captureCalls[0], 'unplaced_orders'))->toBe($expected)
         ->and($session->status)->toBeInstanceOf(Completed::class);
 });
 
@@ -574,14 +650,26 @@ it('refunds, never voids, when completion fails after the hold was already captu
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
 });
 
+it('captures and refunds a hold in the currency the session was pinned in after the cart changed currency', function () {
+    $session = mintPinnedHoldSession();
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
+
+    CheckoutCart::changeCurrency(Cart::query()->findOrFail((int) $session->cart_reference), 'EUR');
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect(Arr::only(FakeHoldGateway::$captureCalls[0] ?? [], ['reference', 'amount', 'currency']))
+        ->toBe(['reference' => 'hold_fake_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP'])
+        ->and(FakeHoldGateway::$refundCalls)
+        ->toBe([['reference' => 'hold_fake_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP']]);
+});
+
 it('refunds the captured hold when completion throws for any reason', function () {
     Exceptions::fake();
     $session = mintPinnedHoldSession();
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     $this->get(route('lunar.checkout.processing', $session->uuid));
 
@@ -596,9 +684,7 @@ it('voids, never refunds, a policy-mode authorisation whose completion throws', 
     $session = mintPinnedStandardSession();
     FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
 
-    config()->set('lunar.orders.pipelines.creation', [
-        fn () => throw new RuntimeException('order pipeline down'),
-    ]);
+    FailingOrderCreationStep::register();
 
     $this->get(route('lunar.checkout.processing', $session->uuid));
 
@@ -636,6 +722,20 @@ it('voids the hold when an expired session is invalidated', function () {
     // Expired: a session carrying an advisory intent always goes through
     // InvalidateCheckoutSession rather than the plain expiry transition.
     expect($session->refresh()->status)->toBeInstanceOf(Cancelled::class);
+});
+
+it('voids the hold of an expired session whose cart was pruned', function () {
+    $session = mintHoldSession();
+    $reference = $session->payment_intent_ref;
+
+    Cart::query()->findOrFail((int) $session->cart_reference)->delete();
+    $session->forceFill(['expires_at' => now()->subMinute()])->save();
+
+    Artisan::call('lunar:checkout:expire-sessions');
+
+    expect(FakeHoldGateway::$voidedReferences)->toBe([$reference])
+        ->and($session->refresh()->status)->toBeInstanceOf(Cancelled::class)
+        ->and($session->active_cart_reference)->toBeNull();
 });
 
 it('voids, never refunds, a stray hold when the driver never supported holds and completion fails', function () {
@@ -734,11 +834,8 @@ it('completes a zero-total hold session even when the best-effort void fails', f
 it('processing routes a reopened hold session to confirm, keeping the payment=failed flag', function () {
     $session = mintPinnedHoldSession();
     FakeHoldGateway::$throwOnCapture = true;
-    FakeHoldGateway::$describeOutcome = new HoldDescription(
-        status: PaymentIntentStatus::RequiresCapture,
-        amountMinor: $session->amount_total,
-        walletLabel: 'Apple Pay',
-    );
+    FakeHoldGateway::$holdAmount = $session->amount_total;
+    FakeHoldGateway::$walletLabel = 'Apple Pay';
 
     $this->get(route('lunar.checkout.processing', $session->uuid))
         ->assertRedirect(route('lunar.checkout.confirm', $session->uuid).'?payment=failed');
@@ -747,10 +844,26 @@ it('processing routes a reopened hold session to confirm, keeping the payment=fa
         ->and($session->payment_intent_ref)->toBe('hold_fake_pinned');
 });
 
+it('voids a hold that waited on the customer too long and sends the customer back to the checkout', function () {
+    $session = mintPinnedHoldSession();
+    $session->forceFill(['payment_processing_at' => now()->subMinutes(31)])->save();
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresAction;
+
+    $this->get(route('lunar.checkout.processing', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertRedirect(route('lunar.checkout.show', $session->uuid).'?payment=failed');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Open::class)
+        ->and(FakeHoldGateway::$voidedReferences)->toBe(['hold_fake_pinned'])
+        ->and($session->payment_intent_ref)->toBeNull()
+        ->and(FakeHoldGateway::$captureCalls)->toBeEmpty();
+});
+
 it('processing falls back to show when a reopened hold no longer verifies', function () {
     $session = mintPinnedHoldSession();
     FakeHoldGateway::$throwOnCapture = true;
-    FakeHoldGateway::$describeOutcome = null;
+    FakeHoldGateway::$fetchScript = [PaymentIntentStatus::RequiresCapture, null];
 
     $this->get(route('lunar.checkout.processing', $session->uuid))
         ->assertRedirect(route('lunar.checkout.show', $session->uuid).'?payment=failed');

@@ -125,6 +125,6 @@ final class PickupPoints
             return false;
         }
 
-        return (bool) ShippingManifest::getOption($cart, $identifier)?->collect;
+        return (bool) ShippingManifest::getOption($cart, $identifier)?->pickup;
     }
 }

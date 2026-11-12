@@ -11,25 +11,31 @@ use Lunar\Checkout\Events\CheckoutCompletionFailed;
 use Lunar\Checkout\Events\CheckoutSessionInvalidated;
 use Lunar\Checkout\Events\CheckoutSessionReconciliationStalled;
 use Lunar\Checkout\Exceptions\PaymentConfirmationException;
+use Lunar\Checkout\Listeners\CompleteSessionOnPaymentSuccess;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Checkout\States\CheckoutSession\Cancelled;
 use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PaymentIntentGateway;
+use Lunar\Core\Contracts\ReconcilesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
+use Lunar\Core\Models\Cart;
+use Lunar\Core\Models\Currency;
 use Lunar\Core\Models\Order;
 
 /**
  * Bounded resolution of a `PaymentProcessing` session (spec 0010 §F): the
  * gateway's actual intent outcome decides — captured completes (or refunds on
  * mismatch: no charge survives without an order), voided/failed reopens,
- * pending reschedules without consuming an attempt. Exhausted attempts fire
- * {@see CheckoutSessionReconciliationStalled} once; the operator `--resolve`
- * override is the sanctioned stall exit.
+ * pending reschedules without consuming an attempt, and an intent left
+ * waiting on the customer past its window is voided and the session reopens.
+ * Exhausted attempts fire {@see CheckoutSessionReconciliationStalled} once;
+ * the operator `--resolve` override is the sanctioned stall exit.
  */
 final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 {
@@ -50,28 +56,42 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
         $gateway = $this->gateways->for($session);
         $reference = $session->payment_intent_ref;
+        $cart = $this->gateways->cartFor($session);
 
         if ($resolve !== null) {
-            return $this->resolveByOperator($session, $gateway, $reference, $resolve);
+            return $this->resolveByOperator($session, $gateway, $cart, $reference, $resolve);
         }
 
-        if ($gateway === null || $reference === null) {
+        if ($gateway === null || $cart === null || $reference === null) {
             return $this->recordAttempt($session);
         }
 
         try {
-            $status = $gateway->fetchIntent($reference);
+            $intent = $gateway->fetchIntent($cart, $reference);
         } catch (PaymentIntentException) {
             return $this->recordAttempt($session);
         }
 
+        $status = $intent?->status;
+
         return match ($status) {
-            // Legitimately still in flight (slow methods) — reschedule
-            // without consuming an attempt (spec 0010 §F).
-            PaymentIntentStatus::Pending => 'pending',
+            // Not an intent the gateway created for this cart: unknowable.
+            null => $this->recordAttempt($session),
+
+            // A slow method that has yet to settle does so on its own:
+            // reschedule without consuming an attempt (spec 0010 §F).
+            PaymentIntentStatus::Processing => 'pending',
+
+            // Waiting on the customer covers a recorded decline and an
+            // abandoned challenge as well as one still under way, and nothing
+            // settles the first two. Past the window the cart is freed for a
+            // retry.
+            PaymentIntentStatus::RequiresAction => $this->waitedOnCustomerTooLong($session)
+                ? $this->voidAndReopen($session, $gateway, $cart, $reference, 'intent_'.$status->value)
+                : 'pending',
 
             PaymentIntentStatus::Captured,
-            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $reference, $status),
+            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $cart, $reference, $intent),
 
             PaymentIntentStatus::Voided,
             PaymentIntentStatus::Failed => $this->reopen($session, 'intent_'.$status->value),
@@ -91,38 +111,57 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // An intent exists, so money may exist. Reopen only on the
             // gateway's word that it was not captured; anything unknowable
             // stays frozen and the reconciliation sweep owns it.
-            if ($gateway === null) {
+            $cart = $this->gateways->cartFor($session);
+
+            if ($gateway === null || $cart === null) {
                 return 'unconfirmed';
             }
 
             try {
-                $status = $gateway->fetchIntent($reference);
+                $intent = $gateway->fetchIntent($cart, $reference);
             } catch (PaymentIntentException) {
                 return 'unconfirmed';
             }
 
-            if (in_array($status, [PaymentIntentStatus::Captured, PaymentIntentStatus::RequiresCapture], true)) {
+            if ($intent === null) {
+                return 'unconfirmed';
+            }
+
+            if (in_array($intent->status, [PaymentIntentStatus::Captured, PaymentIntentStatus::RequiresCapture], true)) {
                 // An authorise-only hold at RequiresCapture is not money
                 // moved: the customer may keep editing and re-confirm, so
                 // reopen with the hold intact instead of forcing completion.
-                if (! ($session->isHoldMode() && $status === PaymentIntentStatus::RequiresCapture)) {
-                    return $this->completeOrRefund($session, $gateway, $reference, $status);
+                if (! ($session->isHoldMode() && $intent->status === PaymentIntentStatus::RequiresCapture)) {
+                    return $this->completeOrRefund($session, $gateway, $cart, $reference, $intent);
                 }
             }
         }
 
-        // Unlike reopen(), the intent reference survives: the customer's
-        // mounted payment element is still bound to it, the intent is still
-        // confirmable, and the retry re-syncs its amount at the pay boundary.
-        $grace = (int) config('lunar.checkout.session.reopen_grace_minutes', 30);
+        return $this->reopenKeepingIntent($session, 'released');
+    }
 
-        $session->transitionGuarded([PaymentProcessing::$name], Open::$name, [
-            'payment_processing_at' => null,
-            'reconciliation_attempts' => 0,
-            'expires_at' => now()->addMinutes($grace),
-        ]);
+    /**
+     * Gives up on an intent the customer never finished. The void comes
+     * first: an intent left confirmable could take a payment after the
+     * session reopened, when nothing settles it and a retry mints a second
+     * intent. A void the gateway refuses means the payment may have gone
+     * through since the fetch, so the session stays pinned and the attempt
+     * counts: the next pass reads the real status.
+     */
+    private function voidAndReopen(
+        CheckoutSession $session,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
+        string $reference,
+        string $reason,
+    ): string {
+        try {
+            $gateway->voidIntent($cart, $reference);
+        } catch (PaymentIntentException) {
+            return $this->recordAttempt($session);
+        }
 
-        return 'released';
+        return $this->reopen($session, $reason);
     }
 
     /**
@@ -131,13 +170,27 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      * (a hold, or a policy-mode requires_capture intent) voids; anything
      * actually captured (a standard intent, or a hold captured by this very
      * call) refunds.
+     *
+     * A gateway keeps reporting a refunded intent as captured, so money an
+     * earlier pass returned is recognised by the refunded amount. A full
+     * refund whose reopen never committed (the pass died, or the gateway's
+     * answer was lost) finishes here without a second refund call. A partial
+     * one is not this class's doing and leaves money with no order, so it
+     * stalls to the operator. Neither ever completes.
      */
     private function completeOrRefund(
         CheckoutSession $session,
-        SupportsPaymentIntents $gateway,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
         string $reference,
-        PaymentIntentStatus $status,
+        PaymentIntentSnapshot $intent,
     ): string {
+        if ($intent->refunded->value > 0) {
+            return $intent->refunded->value >= $intent->captured->value
+                ? $this->moneyBack($session, $gateway, $cart, $reference, captured: true, alreadyRefunded: true)
+                : $this->recordAttempt($session);
+        }
+
         // An authorise-only hold is not money moved yet: capture it now, in
         // the one idempotent place every completion path funnels through, so
         // a crash between pin and capture recovers on the next reconcile.
@@ -148,7 +201,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
         if ($session->isHoldMode() && $gateway instanceof SupportsPaymentHolds) {
             try {
-                $gateway->captureHold($reference, (int) $session->amount_total);
+                $gateway->captureHold($cart, $reference, $this->pinnedAmount($session));
                 $holdCaptured = true;
             } catch (PaymentIntentException $e) {
                 report($e);
@@ -182,7 +235,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             }
         }
 
-        return $this->moneyBack($session, $gateway, $reference, $holdCaptured || $status === PaymentIntentStatus::Captured);
+        return $this->moneyBack($session, $gateway, $cart, $reference, $holdCaptured || $intent->status === PaymentIntentStatus::Captured);
     }
 
     /**
@@ -195,11 +248,13 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      */
     private function moneyBack(
         CheckoutSession $session,
-        SupportsPaymentIntents $gateway,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
         string $reference,
         bool $captured,
+        bool $alreadyRefunded = false,
     ): string {
-        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $reference, $captured): array {
+        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $cart, $reference, $captured, $alreadyRefunded): array {
             $locked = CheckoutSession::query()->whereKey($session->getKey())->lockForUpdate()->firstOrFail();
 
             if ($locked->status instanceof Completed) {
@@ -212,18 +267,10 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 return ['not-applicable', null];
             }
 
-            // The gateway's own authorize() placed an order for this cart
-            // since the pin, before complete() failed: returning the money
-            // would leave a placed order unpaid. The operator resolves it.
-            // An order an earlier checkout of the same cart placed does not
-            // count.
-            $placedForThisPayment = Order::query()
-                ->where('cart_id', (int) $session->cart_reference)
-                ->whereNotNull('placed_at')
-                ->when($locked->payment_processing_at, fn ($query, $pinnedAt) => $query->where('placed_at', '>=', $pinnedAt))
-                ->exists();
-
-            if ($placedForThisPayment) {
+            // The gateway's own authorize() placed an order for this
+            // payment before complete() failed: returning the money would
+            // leave a placed order unpaid. The operator resolves it.
+            if ($this->orderPlacedForThisPayment($locked, $reference)) {
                 return ['order-placed', null];
             }
 
@@ -233,7 +280,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // misconfiguration); voiding is still the safe answer.
             if (! $captured) {
                 try {
-                    $gateway->voidIntent($reference);
+                    $gateway->voidIntent($cart, $reference);
                 } catch (PaymentIntentException) {
                     return ['void-failed', new CheckoutCompletionFailed($session, 'void-failed')];
                 }
@@ -244,19 +291,27 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 return ['voided', new CheckoutCompletionFailed($session, $holdMode ? 'hold-voided' : 'voided')];
             }
 
-            try {
-                $refund = $gateway->refundIntent(
-                    $reference,
-                    $session->amount_total,
-                    'lunar-checkout-refund:'.$reference,
-                );
-            } catch (PaymentIntentException) {
-                return ['refund-failed', new CheckoutCompletionFailed($session, 'refund-failed')];
+            // A refund found on the intent has no reference to pass on: the
+            // snapshot carries amounts only, and the call that made it never
+            // returned one.
+            $refundReference = null;
+
+            if (! $alreadyRefunded) {
+                try {
+                    $refundReference = $gateway->refundIntent(
+                        $cart,
+                        $reference,
+                        $this->pinnedAmount($session),
+                        'lunar-checkout-refund:'.$reference,
+                    )->reference;
+                } catch (PaymentIntentException) {
+                    return ['refund-failed', new CheckoutCompletionFailed($session, 'refund-failed')];
+                }
             }
 
             $this->reopen($session, 'refunded');
 
-            return ['refunded', new CheckoutCompletionFailed($session, 'refunded', $refund->reference)];
+            return ['refunded', new CheckoutCompletionFailed($session, 'refunded', $refundReference)];
         });
 
         // Count the attempt before any listener runs, so a throwing
@@ -273,16 +328,42 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         return $result;
     }
 
+    /**
+     * Whether the gateway placed an order for the payment the session is
+     * pinned on. Two signals, either enough: the order the gateway announced
+     * for this intent ({@see CompleteSessionOnPaymentSuccess} notes it on the
+     * session), or an order placed since the pin, for a placement whose
+     * announcement never reached that listener. An order an earlier checkout
+     * of the same cart placed matches neither.
+     */
+    private function orderPlacedForThisPayment(CheckoutSession $session, string $reference): bool
+    {
+        $placed = Order::query()
+            ->where('cart_id', (int) $session->cart_reference)
+            ->whereNotNull('placed_at');
+
+        $announced = $session->meta['gateway_placed_order'] ?? null;
+
+        if (($announced['intent'] ?? null) === $reference && (clone $placed)->whereKey($announced['order'] ?? null)->exists()) {
+            return true;
+        }
+
+        return $placed
+            ->when($session->payment_processing_at, fn ($query, $pinnedAt) => $query->where('placed_at', '>=', $pinnedAt))
+            ->exists();
+    }
+
     private function resolveByOperator(
         CheckoutSession $session,
-        ?SupportsPaymentIntents $gateway,
+        ?ReconcilesPaymentIntents $gateway,
+        ?Cart $cart,
         ?string $reference,
         string $resolve,
     ): string {
         return match ($resolve) {
             'complete' => $this->completeForOperator($session),
-            'refund' => $gateway !== null && $reference !== null
-                ? $this->completeOrRefundByForce($session, $gateway, $reference)
+            'refund' => $gateway !== null && $cart !== null && $reference !== null
+                ? $this->completeOrRefundByForce($session, $gateway, $cart, $reference)
                 : 'refund-failed',
             'cancel' => $this->cancelForOperator($session),
             default => throw new \InvalidArgumentException("Unknown resolution [{$resolve}]."),
@@ -302,12 +383,14 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      */
     private function completeOrRefundByForce(
         CheckoutSession $session,
-        SupportsPaymentIntents $gateway,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
         string $reference,
     ): string {
         $refund = $gateway->refundIntent(
+            $cart,
             $reference,
-            $session->amount_total,
+            $this->pinnedAmount($session),
             'lunar-checkout-refund:'.$reference,
         );
 
@@ -352,10 +435,11 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
     }
 
     /**
-     * Back to `Open` like {@see reopen()} but the intent reference survives:
-     * nothing was captured (the hold's own capture call failed), so there is
-     * no double-hold risk in leaving the customer bound to the same
-     * authorisation instead of forcing a fresh one.
+     * Back to `Open` like {@see reopen()} but the intent reference survives.
+     * Nothing was captured, so the customer stays bound to the same intent or
+     * authorisation instead of a fresh one: the mounted payment element still
+     * points at it, it is still confirmable, and the retry re-syncs its
+     * amount at the pay boundary.
      */
     private function reopenKeepingIntent(CheckoutSession $session, string $reason): string
     {
@@ -368,6 +452,35 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         ]);
 
         return $reason;
+    }
+
+    /**
+     * A pin with no timestamp can never age into the window, so it counts as
+     * past it rather than holding the cart for good.
+     */
+    private function waitedOnCustomerTooLong(CheckoutSession $session): bool
+    {
+        $minutes = (int) config('lunar.checkout.reconciliation.requires_action_minutes', 30);
+
+        return $session->payment_processing_at?->lte(now()->subMinutes($minutes)) ?? true;
+    }
+
+    /**
+     * The pinned total in the currency it was pinned in. The cart's currency
+     * may have changed since, and a gateway refuses an amount in another
+     * currency from the intent's, or missizes it.
+     *
+     * @throws PaymentIntentException when the store no longer has that
+     *                                currency, rather than guess another
+     */
+    private function pinnedAmount(CheckoutSession $session): PriceValue
+    {
+        $currency = Currency::query()->where('code', $session->currency_code)->first()
+            ?? throw new PaymentIntentException(
+                "Checkout session [{$session->uuid}] was pinned in [{$session->currency_code}], which this store no longer has.",
+            );
+
+        return new PriceValue((int) $session->amount_total, $currency);
     }
 
     private function recordAttempt(CheckoutSession $session): string

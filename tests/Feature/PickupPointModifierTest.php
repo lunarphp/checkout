@@ -21,7 +21,7 @@ it('stamps the chosen point onto the collect option and not onto couriers', func
     $cart = app(SetsFulfilment::class)->execute($cart, 'collect');
 
     $options = ShippingManifest::getOptions($cart);
-    $collect = $options->firstWhere('collect', true);
+    $collect = $options->firstWhere('pickup', true);
 
     expect($collect->meta['pickup_point'])->toBe([
         'handle' => 'dartford',
@@ -31,13 +31,13 @@ it('stamps the chosen point onto the collect option and not onto couriers', func
         'location' => null,
     ]);
 
-    $options->where('collect', false)->each(fn ($option) => expect($option->meta['pickup_point'] ?? null)->toBeNull());
+    $options->where('pickup', false)->each(fn ($option) => expect($option->meta['pickup_point'] ?? null)->toBeNull());
 });
 
 it('leaves option meta alone when no point is chosen', function () {
     $cart = CheckoutCart::orderable(collect: true);
 
-    $collect = ShippingManifest::getOptions($cart)->firstWhere('collect', true);
+    $collect = ShippingManifest::getOptions($cart)->firstWhere('pickup', true);
 
     expect($collect->meta['pickup_point'] ?? null)->toBeNull();
 });
@@ -55,7 +55,7 @@ it('lands on the placed order shipping line and in the order meta', function () 
     $order = Order::query()->firstOrFail();
     $line = $order->shippingLines()->firstOrFail();
 
-    expect($line->meta['collect'])->toBeTrue()
+    expect($line->meta['pickup'])->toBeTrue()
         ->and($line->meta['pickup_point']['handle'])->toBe('dartford')
         ->and($order->meta['pickup_point']['handle'])->toBe('dartford')
         ->and($order->meta['fulfilment'])->toBe('collect');

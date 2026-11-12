@@ -7,9 +7,10 @@ use Lunar\Checkout\Express;
 use Lunar\Checkout\PaymentMethods\AbstractPaymentMethod;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
-use Lunar\Core\DataObjects\HoldDescription;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\HoldAdjustment;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
@@ -18,6 +19,7 @@ use Lunar\Core\Models\Cart;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -38,28 +40,23 @@ class FakeExpressHoldGateway extends OfflinePayment implements CreatesPaymentInt
         return new PaymentIntentDescriptor('pi_fake_'.$cart->id);
     }
 
-    public function describeHold(string $reference): ?HoldDescription
-    {
-        return null;
-    }
-
-    public function adjustHold(string $reference, int $amountMinor): HoldAdjustment
+    public function adjustHold(Cart $cart, string $reference, PriceValue $amount): HoldAdjustment
     {
         return HoldAdjustment::Ok;
     }
 
-    public function captureHold(string $reference, int $amountMinor): void {}
+    public function captureHold(Cart $cart, string $reference, PriceValue $amount): void {}
 
-    // SupportsPaymentHolds extends SupportsPaymentIntents, so the release and
+    // SupportsPaymentHolds extends ReconcilesPaymentIntents, so the release and
     // reconciliation verbs come with it.
-    public function fetchIntent(string $reference): PaymentIntentStatus
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
-        return PaymentIntentStatus::RequiresCapture;
+        return FakeIntents::snapshot($cart, PaymentIntentStatus::RequiresCapture);
     }
 
-    public function voidIntent(string $reference): void {}
+    public function voidIntent(Cart $cart, string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
         return new PaymentRefund(success: true, reference: 'refund_express_'.$reference);
     }

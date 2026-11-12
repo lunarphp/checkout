@@ -63,11 +63,53 @@ class CompleteSessionOnPaymentSuccess
          * finishes on the confirm page, which captures at reconcile; it is
          * never adopted from here.
          */
-        if ($session->status instanceof Open && ($session->isHoldMode() || ! $this->pinForGatewayPayment($session))) {
+        if ($session->status instanceof Open && $session->isHoldMode()) {
+            return;
+        }
+
+        $this->rememberPlacedOrder($session, $authorize->orderId);
+
+        if ($session->status instanceof Open && ! $this->pinForGatewayPayment($session)) {
             return;
         }
 
         $this->driver->complete($session);
+    }
+
+    /**
+     * Notes on the session which order the gateway placed for the intent the
+     * session carries, before anything else can fail. If complete() then
+     * throws, reconciliation must not refund that order's money, and it
+     * cannot tell by time: a session this listener pins is pinned after the
+     * order was placed. The intent is kept beside the order so the note
+     * stops counting once the session moves on to another intent.
+     *
+     * Written under the row lock for the reason pinForGatewayPayment() gives,
+     * in a transaction of its own that commits before that method takes its
+     * snapshot. The caller's copy of the session is left as it was read, so
+     * a session another process moved meanwhile is still caught by the pin's
+     * locked re-read, or by complete()'s guarded write.
+     */
+    private function rememberPlacedOrder(CheckoutSession $session, int $orderId): void
+    {
+        DB::transaction(function () use ($session, $orderId): void {
+            $locked = CheckoutSession::query()
+                ->whereKey($session->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($locked === null || ! ($locked->status instanceof Open || $locked->status instanceof PaymentProcessing)) {
+                return;
+            }
+
+            CheckoutSession::query()
+                ->whereKey($session->getKey())
+                ->update([
+                    'meta' => json_encode(array_merge((array) $locked->meta, [
+                        'gateway_placed_order' => ['order' => $orderId, 'intent' => $locked->payment_intent_ref],
+                    ])),
+                ]);
+        });
     }
 
     /**
@@ -92,10 +134,19 @@ class CompleteSessionOnPaymentSuccess
          * The status moves with the same guarded raw update the pay
          * boundary uses (LunarCheckoutDriver::assertReadyForPayment()):
          * session states change through these one-statement guards, not
-         * model transitions. The snapshot is taken under the lock; complete()
-         * re-verifies it against the cart under the cart-row lock anyway.
+         * model transitions.
+         *
+         * The snapshot is taken before the session row is locked. Taking it
+         * writes the cart row's totals cache, and the pay boundary locks the
+         * cart row before it writes the session row, so snapshotting under
+         * the session lock could deadlock against it. The session lock never
+         * guarded the cart: a cart edit after the snapshot leaves a
+         * fingerprint that complete() rejects under the cart-row lock, and a
+         * session another process moved meanwhile fails the Open check below.
          */
-        $pinned = DB::transaction(function () use ($session): int {
+        $live = $this->driver->snapshot($session);
+
+        $pinned = DB::transaction(function () use ($session, $live): int {
             $locked = CheckoutSession::query()
                 ->whereKey($session->getKey())
                 ->lockForUpdate()
@@ -104,8 +155,6 @@ class CompleteSessionOnPaymentSuccess
             if ($locked === null || ! $locked->status instanceof Open) {
                 return 0;
             }
-
-            $live = $this->driver->snapshot($locked);
 
             return CheckoutSession::query()
                 ->whereKey($session->getKey())

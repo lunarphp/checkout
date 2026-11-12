@@ -75,7 +75,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
         return $this->createCheckoutSession->execute(
             $source,
-            $this->buildSnapshot($source->calculate()),
+            $this->buildSnapshot($source->recalculate()),
             $attributes,
         );
     }
@@ -131,8 +131,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
                 throw new CheckoutSessionNotOperableException('The session\'s source cart no longer exists.');
             }
 
-            $cart->calculate();
-            $live = $this->buildSnapshot($cart);
+            $live = $this->buildSnapshot($cart->recalculate());
 
             $isSync = $session->status instanceof Open;
 
@@ -293,7 +292,9 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         }
 
         try {
-            $gateway->order($order)->withData(['payment_intent' => $reference])->authorize();
+            // `reference` is the key core's CreatesPaymentIntents documents;
+            // `payment_intent` is the one drivers read before it.
+            $gateway->order($order)->withData(['reference' => $reference, 'payment_intent' => $reference])->authorize();
         } catch (\Throwable $e) {
             report(new PaymentRecordingException(
                 "Could not record payment intent [{$reference}] on order [{$order->id}]: {$e->getMessage()}",
@@ -304,7 +305,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
     public function snapshot(CheckoutSession $session): CartSnapshot
     {
-        return $this->buildSnapshot($this->resolveCart($session)->calculate());
+        return $this->buildSnapshot($this->resolveCart($session)->recalculate());
     }
 
     public function fingerprint(CheckoutSession $session): string
@@ -336,8 +337,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
                 throw new CheckoutSessionNotOperableException('The session\'s source cart no longer exists.');
             }
 
-            $cart->calculate();
-            $live = $this->buildSnapshot($cart);
+            $live = $this->buildSnapshot($cart->recalculate());
 
             if (! hash_equals($confirmedFingerprint, $live->fingerprint)) {
                 $this->events->dispatch(new CheckoutPaymentConfirmationFailed($session));
@@ -516,9 +516,9 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         // Mode and option never disagree (spec 0013 §B): a courier chosen
         // while collecting drops the point; the collect option chosen while
         // delivering records collect and applies a single offered point.
-        $mode = $option->collect ? PickupPoints::COLLECT : PickupPoints::DELIVERY;
+        $mode = $option->pickup ? PickupPoints::COLLECT : PickupPoints::DELIVERY;
 
-        if (PickupPoints::fulfilment($cart) !== $mode || $option->collect) {
+        if (PickupPoints::fulfilment($cart) !== $mode || $option->pickup) {
             $cart = $this->setFulfilment->execute($cart->refresh(), $mode);
         }
 
@@ -607,7 +607,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
         $this->events->dispatch(new CustomerAssociated($session, $customerReference));
 
-        return $this->buildSnapshot($cart);
+        return $this->buildSnapshot($cart->recalculate());
     }
 
     /*
@@ -636,7 +636,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
                 'name' => $option->name,
                 'description' => $option->description,
                 'price' => $option->getPrice()->value,
-                'collect' => $option->collect,
+                'collect' => $option->pickup,
             ])
             ->values()
             ->all();
@@ -675,6 +675,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         $cart = $this->resolveCart($session)->calculate();
 
         return $cart->lines
+            ->loadMorph('purchasable', [ProductVariant::class => ['product.thumbnail', 'images']])
             ->map(fn ($line): array => [
                 'identifier' => (string) $line->id,
                 'description' => $line->purchasable?->getDescription(),
@@ -726,7 +727,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
     private function resolveCart(CheckoutSession $session): Cart
     {
-        $cart = Cart::query()->find((int) $session->cart_reference);
+        $cart = Cart::query()->with('lines.purchasable')->find((int) $session->cart_reference);
 
         if ($cart === null) {
             throw new CheckoutSessionNotOperableException('The session\'s source cart no longer exists.');

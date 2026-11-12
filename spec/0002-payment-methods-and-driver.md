@@ -65,14 +65,18 @@ like the element capability interfaces ([[0001-core-element-model]] §B):
 ```php
 namespace Lunar\Core\Contracts;
 
-interface SupportsPaymentIntents
+interface ReconcilesPaymentIntents
 {
-    public function fetchIntent(string $ref): PaymentIntentStatus; // enum: Pending, RequiresCapture,
-                                                                   //       Captured, Voided, Failed
-    public function voidIntent(string $ref): void;
-    public function refundIntent(string $ref, int $amountMinor, string $idempotencyKey): string; // refund ref
+    // Null when the driver did not create the reference for the cart.
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot;
+    public function voidIntent(Cart $cart, string $reference): void;
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund;
 }
 ```
+
+`PaymentIntentSnapshot::$status` is a `PaymentIntentStatus`: `RequiresAction`, `Processing`,
+`RequiresCapture`, `Captured`, `Voided` or `Failed`. `PaymentRefund::$reference` is the
+gateway's refund id.
 
 A gateway that does not implement it **cannot be voided or reconciled**: its sessions stay in
 `PaymentProcessing` and flow into the stall protocol ([[0010-cart-session-reconciliation]] §F).
@@ -153,9 +157,9 @@ re-verifying against the **session** total/currency before transition:
 
 - Recompute the session cart's total and verify `intent.amount`/`currency` match before
   capture/transition; on mismatch, fail and void/refund — routed through
-  `SupportsPaymentIntents` (§A).
+  `ReconcilesPaymentIntents` (§A).
 - Idempotent webhook handling (atomic claim), transaction recording, and intent reconciliation —
-  the fetch/void/refund-by-intent calls route through `SupportsPaymentIntents` (§A).
+  the fetch/void/refund-by-intent calls route through `ReconcilesPaymentIntents` (§A).
 - **Advisory intents.** `payment_intent_ref` is recorded at intent **creation**. A gateway
   success event that resolves to a non-current intent, or to a session not in
   `PaymentProcessing`, is **refunded** (`refundIntent`) — it never completes. Terminalizing an
@@ -201,7 +205,7 @@ session's `PaymentProcessing` state (which rejects element stores), not a cart f
 
 - New `Lunar\Checkout\Contracts\PaymentMethod` + a payment-method registry (in `lunar/checkout`,
   gateway-agnostic) and the payment host element. **No dependency on `lunar/stripe`.**
-- New **core** capability contract `Lunar\Core\Contracts\SupportsPaymentIntents` + the
+- New **core** capability contract `Lunar\Core\Contracts\ReconcilesPaymentIntents` + the
   `PaymentIntentStatus` enum (§A) — additive, opt-in via `instanceof`; existing gateways are
   unaffected until they adopt it.
 - `lunar/stripe` (optional) gains a `StripeCardMethod implements PaymentMethod` + a prebuilt
@@ -219,7 +223,7 @@ session's `PaymentProcessing` state (which rejects element stores), not a cart f
 - A payment-method **contract test** fixture each gateway runs to prove the seam (method resolves
   a registered `AbstractPayment` driver; submit → `authorize()` → `AwaitingPayment → InProcess` +
   `placed_at` + `Transaction` rows). The fixture's **fake gateway implements
-  `SupportsPaymentIntents`** (§A) so the intent-keyed verbs are exercised end-to-end.
+  `ReconcilesPaymentIntents`** (§A) so the intent-keyed verbs are exercised end-to-end.
 - A gateway success event for a **non-current intent**, or for a session **not in
   `PaymentProcessing`**, is refunded via `refundIntent` and never completes the session (§E).
 - Terminalizing an `Open` session **voids its advisory intent first** via `voidIntent` (§E,

@@ -22,7 +22,7 @@ class SetFulfilment implements SetsFulfilment
             ]);
         }
 
-        $cart = $cart->calculate();
+        $cart = $cart->loadMissing('lines.purchasable')->calculate();
         $meta = $cart->meta?->getArrayCopy() ?? [];
         $meta[PickupPoints::MODE_KEY] = $mode;
 
@@ -75,7 +75,7 @@ class SetFulfilment implements SetsFulfilment
             return;
         }
 
-        $collect = $this->shippingManifest->getOptions($cart)->first(fn (ShippingOption $option): bool => $option->collect);
+        $collect = $this->shippingManifest->getOptions($cart)->first(fn (ShippingOption $option): bool => $option->pickup);
 
         if ($collect === null || $cart->shippingAddress->shipping_option === $collect->getIdentifier()) {
             return;
@@ -96,7 +96,7 @@ class SetFulfilment implements SetsFulfilment
             return;
         }
 
-        $courier = $this->shippingManifest->getOptions($cart)->first(fn (ShippingOption $option): bool => ! $option->collect);
+        $courier = $this->shippingManifest->getOptions($cart)->first(fn (ShippingOption $option): bool => ! $option->pickup);
 
         if ($courier !== null) {
             $cart->setShippingOption($courier);

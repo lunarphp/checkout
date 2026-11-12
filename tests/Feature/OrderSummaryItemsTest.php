@@ -44,3 +44,16 @@ it('projects a null image when the product has no media', function () {
     expect($response->json('props.checkout.items.0'))->toHaveKeys(['id', 'title', 'sku', 'image', 'qty', 'price']);
     expect($response->json('props.checkout.items.0.image'))->toBeNull();
 });
+
+it('renders every line of a multi-line cart without lazy loading', function () {
+    $cart = CheckoutCart::orderable();
+    CheckoutCart::addLine($cart, 2500);
+    $session = CheckoutCart::session($cart->refresh());
+
+    $response = $this->get(route('lunar.checkout.show', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertOk();
+
+    expect($response->json('props.checkout.items'))->toHaveCount(2)
+        ->and($response->json('props.checkout.shippingMethods'))->not->toBeEmpty()
+        ->and($response->json('props.checkout.totals.sub_total'))->toBe(3500);
+});

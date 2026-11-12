@@ -16,7 +16,7 @@ use Lunar\Core\Models\Cart;
  *
  *     public function isAvailable(Cart $cart): bool
  *     {
- *         return (bool) $cart->getShippingOption()?->collect;
+ *         return (bool) $cart->getShippingOption()?->pickup;
  *     }
  */
 abstract class AbstractPaymentMethod implements PaymentMethod
