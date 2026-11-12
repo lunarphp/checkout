@@ -68,9 +68,9 @@ class WebhookFirstIntentMethod extends AbstractPaymentMethod
 
 /**
  * Swap the checkout driver for a proxy whose snapshot() first runs $race.
- * The listener calls snapshot() between its locked read and its guarded
- * update, so this exercises the guarded update's lost-race fallback (in
- * production the row lock serialises the other writer instead).
+ * The listener takes its snapshot before it locks the session row, so this
+ * is another process moving the session in that window: the locked re-read
+ * has to notice and leave the session to that process.
  */
 function raceTheListener(Closure $race): void
 {

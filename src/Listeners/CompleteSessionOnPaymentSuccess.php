@@ -92,10 +92,19 @@ class CompleteSessionOnPaymentSuccess
          * The status moves with the same guarded raw update the pay
          * boundary uses (LunarCheckoutDriver::assertReadyForPayment()):
          * session states change through these one-statement guards, not
-         * model transitions. The snapshot is taken under the lock; complete()
-         * re-verifies it against the cart under the cart-row lock anyway.
+         * model transitions.
+         *
+         * The snapshot is taken before the session row is locked. Taking it
+         * writes the cart row's totals cache, and the pay boundary locks the
+         * cart row before it writes the session row, so snapshotting under
+         * the session lock could deadlock against it. The session lock never
+         * guarded the cart: a cart edit after the snapshot leaves a
+         * fingerprint that complete() rejects under the cart-row lock, and a
+         * session another process moved meanwhile fails the Open check below.
          */
-        $pinned = DB::transaction(function () use ($session): int {
+        $live = $this->driver->snapshot($session);
+
+        $pinned = DB::transaction(function () use ($session, $live): int {
             $locked = CheckoutSession::query()
                 ->whereKey($session->getKey())
                 ->lockForUpdate()
@@ -104,8 +113,6 @@ class CompleteSessionOnPaymentSuccess
             if ($locked === null || ! $locked->status instanceof Open) {
                 return 0;
             }
-
-            $live = $this->driver->snapshot($locked);
 
             return CheckoutSession::query()
                 ->whereKey($session->getKey())
