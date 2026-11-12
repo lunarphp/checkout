@@ -151,7 +151,10 @@ it('records the payment on the order when reconcile completes without a webhook'
 
     expect(RecordingGateway::$authorizeCalls)->toHaveCount(1)
         ->and(RecordingGateway::$authorizeCalls[0]['order_id'])->toBe($order->id)
-        ->and(RecordingGateway::$authorizeCalls[0]['data']['payment_intent'])->toBe('pi_recording_pinned')
+        ->and(RecordingGateway::$authorizeCalls[0]['data'])->toBe([
+            'reference' => 'pi_recording_pinned',
+            'payment_intent' => 'pi_recording_pinned',
+        ])
         ->and($session->status)->toBeInstanceOf(Completed::class)
         ->and($order->placed_at)->not->toBeNull()
         ->and($order->transactions()->where('type', 'capture')->count())->toBe(1)

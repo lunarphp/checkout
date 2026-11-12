@@ -292,7 +292,9 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         }
 
         try {
-            $gateway->order($order)->withData(['payment_intent' => $reference])->authorize();
+            // `reference` is the key core's CreatesPaymentIntents documents;
+            // `payment_intent` is the one drivers read before it.
+            $gateway->order($order)->withData(['reference' => $reference, 'payment_intent' => $reference])->authorize();
         } catch (\Throwable $e) {
             report(new PaymentRecordingException(
                 "Could not record payment intent [{$reference}] on order [{$order->id}]: {$e->getMessage()}",
