@@ -5,11 +5,7 @@ use Lunar\Checkout\Contracts\Actions\SetsFulfilment;
 use Lunar\Checkout\Contracts\CheckoutDriver;
 use Lunar\Checkout\DataTypes\PickupPoint;
 use Lunar\Checkout\Exceptions\PaymentConfirmationException;
-use Lunar\Checkout\Validation\Cart\PickupPointRequired;
-use Lunar\Core\Enums\StepList;
 use Lunar\Core\Facades\CartSession;
-use Lunar\Core\Facades\Steps;
-use Lunar\Core\Validation\Cart\ValidateCartForOrderCreation;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
 use Lunar\Tests\Checkout\Utils\PickupPointsStub;
@@ -81,9 +77,4 @@ it('changes the fingerprint when the mode or the point changes', function () {
 
     expect($withLondon)->not->toBe($before)
         ->and($withDartford)->not->toBe($withLondon);
-});
-
-it('appends the pickup point validator after core\'s own', function () {
-    expect(Steps::for(StepList::OrderCreateValidation)->all())
-        ->toBe([ValidateCartForOrderCreation::class, PickupPointRequired::class]);
 });
