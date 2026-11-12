@@ -31,7 +31,7 @@ function driverCart(): Cart
         identifier: 'collection',
         price: new PriceValue(0, Currency::query()->firstWhere('default', true)),
         taxClass: TaxClass::query()->firstWhere('default', true),
-        collect: true,
+        pickup: true,
     ));
 
     CartSession::use($cart);

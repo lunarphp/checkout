@@ -516,9 +516,9 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         // Mode and option never disagree (spec 0013 §B): a courier chosen
         // while collecting drops the point; the collect option chosen while
         // delivering records collect and applies a single offered point.
-        $mode = $option->collect ? PickupPoints::COLLECT : PickupPoints::DELIVERY;
+        $mode = $option->pickup ? PickupPoints::COLLECT : PickupPoints::DELIVERY;
 
-        if (PickupPoints::fulfilment($cart) !== $mode || $option->collect) {
+        if (PickupPoints::fulfilment($cart) !== $mode || $option->pickup) {
             $cart = $this->setFulfilment->execute($cart->refresh(), $mode);
         }
 
@@ -636,7 +636,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
                 'name' => $option->name,
                 'description' => $option->description,
                 'price' => $option->getPrice()->value,
-                'collect' => $option->collect,
+                'collect' => $option->pickup,
             ])
             ->values()
             ->all();

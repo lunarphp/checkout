@@ -95,7 +95,7 @@ class CheckoutCart
             identifier: $collect ? 'collection' : 'standard',
             price: new PriceValue(0, $currency),
             taxClass: $taxClass,
-            collect: $collect,
+            pickup: $collect,
         );
 
         ShippingManifest::addOption($option);
