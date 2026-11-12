@@ -72,9 +72,11 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // Not an intent the gateway created for this cart: unknowable.
             null => $this->recordAttempt($session),
 
-            // Legitimately still in flight (slow methods) — reschedule
-            // without consuming an attempt (spec 0010 §F).
-            PaymentIntentStatus::Pending => 'pending',
+            // Legitimately still in flight (the customer has yet to act, or
+            // a slow method has yet to settle): reschedule without consuming
+            // an attempt (spec 0010 §F).
+            PaymentIntentStatus::RequiresAction,
+            PaymentIntentStatus::Processing => 'pending',
 
             PaymentIntentStatus::Captured,
             PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $cart, $reference, $status),

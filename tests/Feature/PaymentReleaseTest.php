@@ -75,6 +75,26 @@ beforeEach(function () {
     ReleaseTestGateway::$fetchedCartIds = [];
 });
 
+dataset('in-flight intent statuses', [
+    'waiting on the customer' => [PaymentIntentStatus::RequiresAction],
+    'gateway still deciding' => [PaymentIntentStatus::Processing],
+]);
+
+it('reconciles an in-flight intent to pending without consuming an attempt', function (PaymentIntentStatus $status) {
+    ReleaseTestGateway::$status = $status;
+
+    $session = pinnedSession();
+
+    expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('pending');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(0)
+        ->and($session->payment_intent_ref)->toBe('pi_test_123')
+        ->and(ReleaseTestGateway::$fetchedCartIds)->toBe([(int) $session->cart_reference]);
+})->with('in-flight intent statuses');
+
 it('counts an attempt when the gateway did not create the reference for the cart', function () {
     ReleaseTestGateway::$status = null;
 
@@ -98,7 +118,9 @@ it('counts an attempt without asking the gateway when the cart is gone', functio
         ->and(ReleaseTestGateway::$fetchedCartIds)->toBeEmpty();
 });
 
-it('reopens a pinned session when the gateway holds no captured money', function () {
+it('reopens a pinned session when the gateway holds no captured money', function (PaymentIntentStatus $status) {
+    ReleaseTestGateway::$status = $status;
+
     $session = pinnedSession();
 
     $this->postJson(route('lunar.checkout.payment-release', $session->uuid))
@@ -113,7 +135,7 @@ it('reopens a pinned session when the gateway holds no captured money', function
     // payment element is still bound to it.
     expect($session->status)->toBeInstanceOf(Open::class)
         ->and($session->payment_intent_ref)->toBe('pi_test_123');
-});
+})->with('in-flight intent statuses');
 
 it('completes instead of releasing when the money was captured', function () {
     ReleaseTestGateway::$status = PaymentIntentStatus::Captured;
@@ -256,8 +278,8 @@ it('processing sends a failed payment back to the checkout to retry', function (
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
 });
 
-it('processing renders the polling page while the outcome is in flight', function () {
-    ReleaseTestGateway::$status = PaymentIntentStatus::Processing;
+it('processing renders the polling page while the outcome is in flight', function (PaymentIntentStatus $status) {
+    ReleaseTestGateway::$status = $status;
 
     $session = pinnedSession();
 
@@ -267,7 +289,7 @@ it('processing renders the polling page while the outcome is in flight', functio
         ->assertJsonPath('props.pollUrl', route('lunar.checkout.processing', $session->uuid));
 
     expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class);
-});
+})->with('in-flight intent statuses');
 
 it('processing shows the same merchant name as the checkout', function () {
     ReleaseTestGateway::$status = PaymentIntentStatus::Processing;
