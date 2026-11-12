@@ -1,15 +1,22 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Event;
 use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
+use Lunar\Checkout\Contracts\CheckoutDriver;
+use Lunar\Checkout\Events\CheckoutCompletionFailed;
+use Lunar\Checkout\Events\CheckoutSessionReconciliationStalled;
+use Lunar\Checkout\Exceptions\CheckoutSessionConflictException;
 use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\ReconcilesPaymentIntents;
+use Lunar\Core\DataObjects\PaymentAuthorize;
 use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
 use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
+use Lunar\Core\Events\PaymentAttemptEvent;
 use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
@@ -80,10 +87,10 @@ dataset('in-flight intent statuses', [
     'gateway still deciding' => [PaymentIntentStatus::Processing],
 ]);
 
-it('reconciles an in-flight intent to pending without consuming an attempt', function (PaymentIntentStatus $status) {
+it('reconciles a recently pinned in-flight intent to pending without consuming an attempt', function (PaymentIntentStatus $status) {
     ReleaseTestGateway::$status = $status;
 
-    $session = pinnedSession();
+    $session = pinnedSession(['payment_processing_at' => now()->subMinutes(29)]);
 
     expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('pending');
 
@@ -94,6 +101,103 @@ it('reconciles an in-flight intent to pending without consuming an attempt', fun
         ->and($session->payment_intent_ref)->toBe('pi_test_123')
         ->and(ReleaseTestGateway::$fetchedCartIds)->toBe([(int) $session->cart_reference]);
 })->with('in-flight intent statuses');
+
+it('reopens a session whose intent has waited on the customer past the window, keeping the intent', function () {
+    Event::fake([CheckoutCompletionFailed::class, CheckoutSessionReconciliationStalled::class]);
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinutes(31)]);
+
+    expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('intent_requires_action');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBe('pi_test_123')
+        ->and($session->payment_processing_at)->toBeNull()
+        ->and($session->reconciliation_attempts)->toBe(0)
+        ->and($session->expires_at->isFuture())->toBeTrue();
+
+    Event::assertNotDispatched(CheckoutCompletionFailed::class);
+    Event::assertNotDispatched(CheckoutSessionReconciliationStalled::class);
+});
+
+it('keeps a session pinned while the gateway is still deciding, however long that takes', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::Processing;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subDays(3)]);
+
+    expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('pending');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(0)
+        ->and($session->payment_intent_ref)->toBe('pi_test_123');
+});
+
+it('reads how long an intent may wait on the customer from config', function () {
+    config()->set('lunar.checkout.reconciliation.requires_action_minutes', 5);
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $inside = pinnedSession(['payment_processing_at' => now()->subMinutes(4)]);
+    $past = pinnedSession(['payment_processing_at' => now()->subMinutes(6), 'payment_intent_ref' => 'pi_test_456']);
+
+    app(ReconcilesCheckoutSession::class)->execute($inside);
+    app(ReconcilesCheckoutSession::class)->execute($past);
+
+    expect($inside->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($past->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('reopens a session waiting on the customer whose pin time was never recorded', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession(['payment_processing_at' => null]);
+
+    app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBe('pi_test_123');
+});
+
+it('lets the sweep free a cart whose payment the customer abandoned', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinutes(61)]);
+    $cart = Cart::query()->findOrFail((int) $session->cart_reference);
+
+    expect(fn () => app(CheckoutDriver::class)->createSession($cart))
+        ->toThrow(CheckoutSessionConflictException::class);
+
+    $this->artisan('lunar:checkout:reconcile')->assertSuccessful();
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->reconciliation_attempts)->toBe(0)
+        ->and($session->meta['reconciliation_stalled'] ?? false)->toBeFalse()
+        ->and(app(CheckoutDriver::class)->resolveOrCreateSession($cart)->is($session))->toBeTrue();
+});
+
+it('completes a reopened session when the customer finishes the payment afterwards', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinutes(31)]);
+
+    app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+
+    $order = Cart::query()->findOrFail((int) $session->cart_reference)->createOrder();
+    $order->update(['placed_at' => now()]);
+
+    PaymentAttemptEvent::dispatch(new PaymentAuthorize(success: true, orderId: $order->id, paymentType: 'release-test'));
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Completed::class)
+        ->and((string) $session->order_reference)->toBe((string) $order->id)
+        ->and(Order::query()->count())->toBe(1);
+});
 
 it('counts an attempt when the gateway did not create the reference for the cart', function () {
     ReleaseTestGateway::$status = null;
@@ -276,6 +380,18 @@ it('processing sends a failed payment back to the checkout to retry', function (
         ->assertRedirect(route('lunar.checkout.show', $session->uuid).'?payment=failed');
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('processing sends a payment that waited on the customer too long back to the checkout to retry', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinutes(31)]);
+
+    $this->get(route('lunar.checkout.processing', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertRedirect(route('lunar.checkout.show', $session->uuid).'?payment=failed');
+
+    expect($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBe('pi_test_123');
 });
 
 it('processing renders the polling page while the outcome is in flight', function (PaymentIntentStatus $status) {

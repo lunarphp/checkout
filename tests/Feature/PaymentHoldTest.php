@@ -769,6 +769,31 @@ it('processing routes a reopened hold session to confirm, keeping the payment=fa
         ->and($session->payment_intent_ref)->toBe('hold_fake_pinned');
 });
 
+it('routes a hold session reopened after waiting on the customer to confirm once the hold is authorised', function () {
+    $session = mintPinnedHoldSession();
+    $session->forceFill(['payment_processing_at' => now()->subMinutes(31)])->save();
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresAction;
+
+    $this->get(route('lunar.checkout.processing', $session->uuid), ['X-Inertia' => 'true'])
+        ->assertRedirect(route('lunar.checkout.show', $session->uuid).'?payment=failed');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBe('hold_fake_pinned')
+        ->and($session->isHoldMode())->toBeTrue()
+        ->and(FakeHoldGateway::$voidedReferences)->toBeEmpty();
+
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
+    FakeHoldGateway::$holdAmount = $session->amount_total;
+    FakeHoldGateway::$walletLabel = 'Apple Pay';
+
+    $this->get(route('lunar.checkout.processing', $session->uuid))
+        ->assertRedirect(route('lunar.checkout.confirm', $session->uuid).'?payment=failed');
+
+    expect(FakeHoldGateway::$captureCalls)->toBeEmpty();
+});
+
 it('processing falls back to show when a reopened hold no longer verifies', function () {
     $session = mintPinnedHoldSession();
     FakeHoldGateway::$throwOnCapture = true;

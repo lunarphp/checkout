@@ -491,7 +491,13 @@ aged on `payment_processing_at`, §A) and **forces reconciliation** through the
 gateway driver: `fetchIntent` → §E.2 (complete / refund) or void → `Open`
 (return-path hygiene, §E.2). Each run increments `reconciliation_attempts`; a
 still-pending intent on a slow method (bank transfer, voucher) **reschedules
-without consuming an attempt**, up to a method-declared deadline. After the
+without consuming an attempt**, up to a method-declared deadline. An intent
+still **waiting on the customer** (a declined card, an abandoned challenge, an
+async method that failed back to "pick another method") never settles on its
+own, so it is pending only for `reconciliation.requires_action_minutes`
+(default 30, aged on `payment_processing_at`); past that the session returns to
+`Open` with the intent kept, no attempt consumed and no event, so the customer
+can retry and the expiry sweep voids the intent if they never do. After the
 maximum attempts the session is **stalled**:
 `CheckoutSessionReconciliationStalled` fires **once** (never per-run noise),
 and the session drops to a **low-frequency retry tier** — not silence. The

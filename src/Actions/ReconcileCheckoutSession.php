@@ -29,7 +29,8 @@ use Lunar\Core\Models\Order;
  * Bounded resolution of a `PaymentProcessing` session (spec 0010 §F): the
  * gateway's actual intent outcome decides — captured completes (or refunds on
  * mismatch: no charge survives without an order), voided/failed reopens,
- * pending reschedules without consuming an attempt. Exhausted attempts fire
+ * pending reschedules without consuming an attempt, and an intent left
+ * waiting on the customer past its window reopens. Exhausted attempts fire
  * {@see CheckoutSessionReconciliationStalled} once; the operator `--resolve`
  * override is the sanctioned stall exit.
  */
@@ -72,11 +73,17 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // Not an intent the gateway created for this cart: unknowable.
             null => $this->recordAttempt($session),
 
-            // Legitimately still in flight (the customer has yet to act, or
-            // a slow method has yet to settle): reschedule without consuming
-            // an attempt (spec 0010 §F).
-            PaymentIntentStatus::RequiresAction,
+            // A slow method that has yet to settle does so on its own:
+            // reschedule without consuming an attempt (spec 0010 §F).
             PaymentIntentStatus::Processing => 'pending',
+
+            // Waiting on the customer covers a recorded decline and an
+            // abandoned challenge as well as one still under way, and nothing
+            // settles the first two. Past the window the cart is freed for a
+            // retry; the intent stays confirmable, so it is kept.
+            PaymentIntentStatus::RequiresAction => $this->waitedOnCustomerTooLong($session)
+                ? $this->reopenKeepingIntent($session, 'intent_'.$status->value)
+                : 'pending',
 
             PaymentIntentStatus::Captured,
             PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $cart, $reference, $status),
@@ -125,18 +132,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             }
         }
 
-        // Unlike reopen(), the intent reference survives: the customer's
-        // mounted payment element is still bound to it, the intent is still
-        // confirmable, and the retry re-syncs its amount at the pay boundary.
-        $grace = (int) config('lunar.checkout.session.reopen_grace_minutes', 30);
-
-        $session->transitionGuarded([PaymentProcessing::$name], Open::$name, [
-            'payment_processing_at' => null,
-            'reconciliation_attempts' => 0,
-            'expires_at' => now()->addMinutes($grace),
-        ]);
-
-        return 'released';
+        return $this->reopenKeepingIntent($session, 'released');
     }
 
     /**
@@ -372,10 +368,11 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
     }
 
     /**
-     * Back to `Open` like {@see reopen()} but the intent reference survives:
-     * nothing was captured (the hold's own capture call failed), so there is
-     * no double-hold risk in leaving the customer bound to the same
-     * authorisation instead of forcing a fresh one.
+     * Back to `Open` like {@see reopen()} but the intent reference survives.
+     * Nothing was captured, so the customer stays bound to the same intent or
+     * authorisation instead of a fresh one: the mounted payment element still
+     * points at it, it is still confirmable, and the retry re-syncs its
+     * amount at the pay boundary.
      */
     private function reopenKeepingIntent(CheckoutSession $session, string $reason): string
     {
@@ -388,6 +385,17 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         ]);
 
         return $reason;
+    }
+
+    /**
+     * A pin with no timestamp can never age into the window, so it counts as
+     * past it rather than holding the cart for good.
+     */
+    private function waitedOnCustomerTooLong(CheckoutSession $session): bool
+    {
+        $minutes = (int) config('lunar.checkout.reconciliation.requires_action_minutes', 30);
+
+        return $session->payment_processing_at?->lte(now()->subMinutes($minutes)) ?? true;
     }
 
     private function pinnedAmount(CheckoutSession $session, Cart $cart): PriceValue

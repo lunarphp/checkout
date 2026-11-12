@@ -146,6 +146,14 @@ return [
         // webhook-less fallback. Small enough that a stuck customer is not
         // stuck, large enough not to race the immediate post-confirm webhook.
         'on_view_after_seconds' => 5,
+
+        // How long (minutes, aged on the pin) an intent may wait on the
+        // customer before the session reopens for a retry with the intent
+        // kept. A declined card and an abandoned 3-D Secure challenge both
+        // read as waiting on the customer and neither settles on its own, so
+        // without this the cart stays locked. Long enough to finish a
+        // challenge or a bank redirect.
+        'requires_action_minutes' => 30,
     ],
 
     /*
