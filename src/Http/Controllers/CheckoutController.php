@@ -146,9 +146,29 @@ class CheckoutController extends Controller
      * caller returns a bare 409 SymfonyResponse rather than a RedirectResponse
      * (same reason `start()` above is typed against SymfonyResponse).
      */
-    public function show(CheckoutSessionModel $session, CheckoutDriver $checkoutDriver, CheckoutTheme $theme): Response|RedirectResponse|SymfonyResponse
+    public function show(Request $request, CheckoutSessionModel $session, CheckoutDriver $checkoutDriver, CheckoutTheme $theme): Response|RedirectResponse|SymfonyResponse
     {
         $this->ensureOwnership($session);
+
+        /*
+         * A redirect payment method (Klarna, PayPal, a full-page 3DS
+         * challenge) that failed or was cancelled lands back here with the
+         * session still pinned: the browser left the page, so the in-page
+         * release never ran. Release it now, on the gateway's word that
+         * nothing was captured, and send the customer to the retry state.
+         */
+        if ($session->status instanceof PaymentProcessing && $this->returnedFromFailedRedirect($request, $session)) {
+            try {
+                app(ReconcilesCheckoutSession::class)->release($session);
+                $session->refresh();
+            } catch (\Throwable $e) {
+                report($e);
+            }
+
+            if ($session->status instanceof Open) {
+                return redirect()->to(route('lunar.checkout.show', $session->uuid).'?payment=failed');
+            }
+        }
 
         /*
          * A pinned session normally completes via the gateway webhook, but
@@ -1440,6 +1460,22 @@ class CheckoutController extends Controller
      * carries the developer reason code ("Payment confirmation rejected
      * [fingerprint_mismatch]."), which is for logs, not for the customer.
      */
+    /**
+     * Whether Stripe sent the customer back from a redirect payment method
+     * that did not go through. StripeCard.vue gives Stripe this page as its
+     * `return_url`, and Stripe appends the intent it was confirming and how
+     * the redirect ended. Only a failure for the session's own intent
+     * counts. These are the only gateway parameters the controller reads,
+     * and they grant nothing new: the session's owner can already ask for
+     * the same release through releasePayment().
+     */
+    private function returnedFromFailedRedirect(Request $request, CheckoutSessionModel $session): bool
+    {
+        return $request->query('redirect_status') === 'failed'
+            && $session->payment_intent_ref !== null
+            && $request->query('payment_intent') === $session->payment_intent_ref;
+    }
+
     private function paymentRejectionMessage(PaymentConfirmationException $e): string
     {
         return match ($e->reason) {

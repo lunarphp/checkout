@@ -354,6 +354,49 @@ it('reopens a failed pinned session when the customer views it', function () {
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
 });
 
+it('reopens a pinned session at once when the customer returns from a failed gateway redirect', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinute()]);
+
+    $response = $this->get(route('lunar.checkout.show', $session->uuid).'?payment_intent=pi_test_123&payment_intent_client_secret=secret&redirect_status=failed');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBe('pi_test_123');
+
+    $response->assertRedirect(route('lunar.checkout.show', $session->uuid).'?payment=failed');
+});
+
+it('keeps a session pinned on view unless the redirect failed for its own intent', function (string $query) {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession(['payment_processing_at' => now()->subMinute()]);
+
+    $this->get(route('lunar.checkout.show', $session->uuid).$query, ['X-Inertia' => 'true'])->assertOk();
+
+    expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class);
+})->with([
+    'no redirect parameters' => [''],
+    'a redirect that succeeded' => ['?payment_intent=pi_test_123&redirect_status=succeeded'],
+    'a failed redirect for another intent' => ['?payment_intent=pi_test_other&redirect_status=failed'],
+    'a failed redirect naming no intent' => ['?redirect_status=failed'],
+]);
+
+it('completes instead of reopening when the gateway captured despite a failed redirect return', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::Captured;
+
+    $session = pinnedSession(['success_url' => 'https://store.test/thanks']);
+
+    $response = $this->get(route('lunar.checkout.show', $session->uuid).'?payment_intent=pi_test_123&redirect_status=failed');
+
+    expect($session->refresh()->status)->toBeInstanceOf(Completed::class)
+        ->and(Order::query()->count())->toBe(1);
+
+    $response->assertRedirect('https://store.test/thanks');
+});
+
 it('processing settles a captured session and forwards to the success url', function () {
     ReleaseTestGateway::$status = PaymentIntentStatus::Captured;
 

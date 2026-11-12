@@ -510,6 +510,16 @@ until one of those exits applies. Retention pruning anchors on the terminal
 timestamps (`completed_at` / `cancelled_at` / `expires_at`); a stalled session
 is pruned only after it reaches a terminal state through a sanctioned exit.
 
+**Return from a failed redirect.** A redirect payment method (Klarna, PayPal, a
+full-page 3DS challenge) that fails or is cancelled sends the customer back to
+the session URL with the session still pinned, and the in-page release never
+ran because the browser had left the page. When that request carries Stripe's
+`redirect_status=failed` for the session's own `payment_intent`, the session
+page runs the customer-initiated release before it renders: `→ Open` with the
+intent kept, only on the gateway's word that nothing was captured (a captured
+intent resolves through §E.2 instead), then a redirect to the retry state.
+Without those parameters the session waits out the window above.
+
 ### F.2 One active session per cart
 
 `cart_reference` 1:N sessions is per-*attempt* history, not per-attempt
