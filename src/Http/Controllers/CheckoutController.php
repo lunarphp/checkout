@@ -1116,7 +1116,7 @@ class CheckoutController extends Controller
 
         return response()->json([
             'intent' => $descriptor->reference,
-            'clientSecret' => $descriptor->clientSecret,
+            'clientSecret' => $descriptor->clientPayload['client_secret'] ?? null,
         ]);
     }
 

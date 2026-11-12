@@ -34,7 +34,7 @@ class WebhookFirstIntentGateway extends OfflinePayment implements CreatesPayment
 
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
-        return new PaymentIntentDescriptor('pi_webhook_first_'.$cart->id, 'secret_'.$cart->id);
+        return new PaymentIntentDescriptor('pi_webhook_first_'.$cart->id, clientPayload: ['client_secret' => 'secret_'.$cart->id]);
     }
 }
 
