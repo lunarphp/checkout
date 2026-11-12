@@ -247,3 +247,28 @@ it('leaves a session alone when another process ends it first', function () {
 
     Log::shouldNotHaveReceived('warning');
 });
+
+it('leaves a session alone when another process ends it just after the listener read it', function () {
+    Event::fake([OrderPlacing::class]);
+
+    $cart = CheckoutCart::orderable();
+    CartSession::use($cart);
+    $session = app(CheckoutDriver::class)->resolveOrCreateSession($cart);
+    $order = $cart->createOrder();
+
+    // The listener's copy still reads Open; the row another process wrote
+    // does not.
+    $ended = false;
+    CheckoutSession::retrieved(function (CheckoutSession $read) use (&$ended) {
+        if (! $ended) {
+            $ended = true;
+            CheckoutSession::query()->whereKey($read->getKey())->update(['status' => Cancelled::$name]);
+        }
+    });
+
+    gatewayPlacesOrder($order);
+
+    expect($session->refresh()->status)->toBeInstanceOf(Cancelled::class);
+
+    Event::assertNotDispatched(OrderPlacing::class);
+});

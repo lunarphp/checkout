@@ -86,7 +86,9 @@ class CompleteSessionOnPaymentSuccess
      *
      * Written under the row lock for the reason pinForGatewayPayment() gives,
      * in a transaction of its own that commits before that method takes its
-     * snapshot.
+     * snapshot. The caller's copy of the session is left as it was read, so
+     * a session another process moved meanwhile is still caught by the pin's
+     * locked re-read, or by complete()'s guarded write.
      */
     private function rememberPlacedOrder(CheckoutSession $session, int $orderId): void
     {
@@ -108,8 +110,6 @@ class CompleteSessionOnPaymentSuccess
                     ])),
                 ]);
         });
-
-        $session->refresh();
     }
 
     /**
