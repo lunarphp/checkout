@@ -16,9 +16,10 @@ use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\CartSession;
@@ -28,10 +29,11 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
 
-class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentIntents, SupportsPaymentIntents
+class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentIntents
 {
     /** @var array<int, array{reference: string, amount: int}> */
     public static array $refunds = [];
@@ -43,20 +45,20 @@ class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentInte
         return new PaymentIntentDescriptor('pi_captured_'.$cart->id);
     }
 
-    public function fetchIntent(string $reference): PaymentIntentStatus
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
-        return PaymentIntentStatus::Captured;
+        return FakeIntents::snapshot($cart, PaymentIntentStatus::Captured);
     }
 
-    public function voidIntent(string $reference): void {}
+    public function voidIntent(Cart $cart, string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
         if (static::$refundFails) {
             throw new PaymentIntentException('gateway refund failed');
         }
 
-        static::$refunds[] = ['reference' => $reference, 'amount' => $amountMinor];
+        static::$refunds[] = ['reference' => $reference, 'amount' => $amount->value];
 
         return new PaymentRefund(success: true, reference: 'refund_'.$reference);
     }

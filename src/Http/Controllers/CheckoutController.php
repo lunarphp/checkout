@@ -42,8 +42,8 @@ use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PickupPoints;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
+use Lunar\Core\Contracts\ReconcilesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\Contracts\SyncsPaymentIntents;
 use Lunar\Core\DataObjects\HoldDescription;
 use Lunar\Core\Enums\HoldAdjustment;
@@ -1013,9 +1013,9 @@ class CheckoutController extends Controller
         // Re-authorisation (payment change, or a hold the rail could not
         // stretch): release the old hold FIRST, so the customer is never
         // double-held. A void the gateway cannot confirm aborts the renewal.
-        if ($holdMode && ($data['renew'] ?? false) && $session->payment_intent_ref !== null && $gateway instanceof SupportsPaymentIntents) {
+        if ($holdMode && ($data['renew'] ?? false) && $session->payment_intent_ref !== null && $gateway instanceof ReconcilesPaymentIntents) {
             try {
-                $gateway->voidIntent($session->payment_intent_ref);
+                $gateway->voidIntent($cart, $session->payment_intent_ref);
             } catch (\Throwable $e) {
                 report($e);
 
@@ -1041,9 +1041,9 @@ class CheckoutController extends Controller
         if (! $holdMode && $session->isHoldMode() && $session->payment_intent_ref !== null) {
             $previousGateway = Payments::driver((string) ($session->meta['payment_method'] ?? ''));
 
-            if ($previousGateway instanceof SupportsPaymentIntents) {
+            if ($previousGateway instanceof ReconcilesPaymentIntents) {
                 try {
-                    $previousGateway->voidIntent($session->payment_intent_ref);
+                    $previousGateway->voidIntent($cart, $session->payment_intent_ref);
                 } catch (\Throwable $e) {
                     report($e);
 
@@ -1219,9 +1219,9 @@ class CheckoutController extends Controller
                 if ($session->isHoldMode() && $session->payment_intent_ref !== null) {
                     $holdGateway = Payments::driver((string) ($session->meta['payment_method'] ?? ''));
 
-                    if ($holdGateway instanceof SupportsPaymentIntents) {
+                    if ($holdGateway instanceof ReconcilesPaymentIntents) {
                         try {
-                            $holdGateway->voidIntent($session->payment_intent_ref);
+                            $holdGateway->voidIntent($cart, $session->payment_intent_ref);
                         } catch (\Throwable $e) {
                             report($e);
                         }

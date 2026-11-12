@@ -17,10 +17,12 @@ use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PaymentIntentGateway;
+use Lunar\Core\Contracts\ReconcilesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
+use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Order;
 
 /**
@@ -50,28 +52,32 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
         $gateway = $this->gateways->for($session);
         $reference = $session->payment_intent_ref;
+        $cart = Cart::query()->find((int) $session->cart_reference);
 
         if ($resolve !== null) {
-            return $this->resolveByOperator($session, $gateway, $reference, $resolve);
+            return $this->resolveByOperator($session, $gateway, $cart, $reference, $resolve);
         }
 
-        if ($gateway === null || $reference === null) {
+        if ($gateway === null || $cart === null || $reference === null) {
             return $this->recordAttempt($session);
         }
 
         try {
-            $status = $gateway->fetchIntent($reference);
+            $status = $gateway->fetchIntent($cart, $reference)?->status;
         } catch (PaymentIntentException) {
             return $this->recordAttempt($session);
         }
 
         return match ($status) {
+            // Not an intent the gateway created for this cart: unknowable.
+            null => $this->recordAttempt($session),
+
             // Legitimately still in flight (slow methods) — reschedule
             // without consuming an attempt (spec 0010 §F).
             PaymentIntentStatus::Pending => 'pending',
 
             PaymentIntentStatus::Captured,
-            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $reference, $status),
+            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $cart, $reference, $status),
 
             PaymentIntentStatus::Voided,
             PaymentIntentStatus::Failed => $this->reopen($session, 'intent_'.$status->value),
@@ -91,13 +97,19 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // An intent exists, so money may exist. Reopen only on the
             // gateway's word that it was not captured; anything unknowable
             // stays frozen and the reconciliation sweep owns it.
-            if ($gateway === null) {
+            $cart = Cart::query()->find((int) $session->cart_reference);
+
+            if ($gateway === null || $cart === null) {
                 return 'unconfirmed';
             }
 
             try {
-                $status = $gateway->fetchIntent($reference);
+                $status = $gateway->fetchIntent($cart, $reference)?->status;
             } catch (PaymentIntentException) {
+                return 'unconfirmed';
+            }
+
+            if ($status === null) {
                 return 'unconfirmed';
             }
 
@@ -106,7 +118,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 // moved: the customer may keep editing and re-confirm, so
                 // reopen with the hold intact instead of forcing completion.
                 if (! ($session->isHoldMode() && $status === PaymentIntentStatus::RequiresCapture)) {
-                    return $this->completeOrRefund($session, $gateway, $reference, $status);
+                    return $this->completeOrRefund($session, $gateway, $cart, $reference, $status);
                 }
             }
         }
@@ -134,7 +146,8 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      */
     private function completeOrRefund(
         CheckoutSession $session,
-        SupportsPaymentIntents $gateway,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
         string $reference,
         PaymentIntentStatus $status,
     ): string {
@@ -182,7 +195,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             }
         }
 
-        return $this->moneyBack($session, $gateway, $reference, $holdCaptured || $status === PaymentIntentStatus::Captured);
+        return $this->moneyBack($session, $gateway, $cart, $reference, $holdCaptured || $status === PaymentIntentStatus::Captured);
     }
 
     /**
@@ -195,11 +208,12 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      */
     private function moneyBack(
         CheckoutSession $session,
-        SupportsPaymentIntents $gateway,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
         string $reference,
         bool $captured,
     ): string {
-        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $reference, $captured): array {
+        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $cart, $reference, $captured): array {
             $locked = CheckoutSession::query()->whereKey($session->getKey())->lockForUpdate()->firstOrFail();
 
             if ($locked->status instanceof Completed) {
@@ -233,7 +247,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // misconfiguration); voiding is still the safe answer.
             if (! $captured) {
                 try {
-                    $gateway->voidIntent($reference);
+                    $gateway->voidIntent($cart, $reference);
                 } catch (PaymentIntentException) {
                     return ['void-failed', new CheckoutCompletionFailed($session, 'void-failed')];
                 }
@@ -246,8 +260,9 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
             try {
                 $refund = $gateway->refundIntent(
+                    $cart,
                     $reference,
-                    $session->amount_total,
+                    $this->pinnedAmount($session, $cart),
                     'lunar-checkout-refund:'.$reference,
                 );
             } catch (PaymentIntentException) {
@@ -275,14 +290,15 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
     private function resolveByOperator(
         CheckoutSession $session,
-        ?SupportsPaymentIntents $gateway,
+        ?ReconcilesPaymentIntents $gateway,
+        ?Cart $cart,
         ?string $reference,
         string $resolve,
     ): string {
         return match ($resolve) {
             'complete' => $this->completeForOperator($session),
-            'refund' => $gateway !== null && $reference !== null
-                ? $this->completeOrRefundByForce($session, $gateway, $reference)
+            'refund' => $gateway !== null && $cart !== null && $reference !== null
+                ? $this->completeOrRefundByForce($session, $gateway, $cart, $reference)
                 : 'refund-failed',
             'cancel' => $this->cancelForOperator($session),
             default => throw new \InvalidArgumentException("Unknown resolution [{$resolve}]."),
@@ -302,12 +318,14 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      */
     private function completeOrRefundByForce(
         CheckoutSession $session,
-        SupportsPaymentIntents $gateway,
+        ReconcilesPaymentIntents $gateway,
+        Cart $cart,
         string $reference,
     ): string {
         $refund = $gateway->refundIntent(
+            $cart,
             $reference,
-            $session->amount_total,
+            $this->pinnedAmount($session, $cart),
             'lunar-checkout-refund:'.$reference,
         );
 
@@ -368,6 +386,11 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         ]);
 
         return $reason;
+    }
+
+    private function pinnedAmount(CheckoutSession $session, Cart $cart): PriceValue
+    {
+        return new PriceValue((int) $session->amount_total, $cart->currency);
     }
 
     private function recordAttempt(CheckoutSession $session): string

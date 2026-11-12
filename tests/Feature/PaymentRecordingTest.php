@@ -9,10 +9,11 @@ use Lunar\Checkout\PaymentMethods\AbstractPaymentMethod;
 use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\DataObjects\PaymentAuthorize;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
@@ -21,6 +22,7 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -31,7 +33,7 @@ uses(TestCase::class, RefreshDatabase::class);
  * checkout driver ran the shared authorize() path itself (spec 0002 §E)
  * instead of leaving it to a webhook.
  */
-class RecordingGateway extends OfflinePayment implements CreatesPaymentIntents, SupportsPaymentIntents
+class RecordingGateway extends OfflinePayment implements CreatesPaymentIntents
 {
     /** @var array<int, array{order_id: int, data: array<string, mixed>}> */
     public static array $authorizeCalls = [];
@@ -43,14 +45,14 @@ class RecordingGateway extends OfflinePayment implements CreatesPaymentIntents, 
         return new PaymentIntentDescriptor('pi_recording_'.$cart->id);
     }
 
-    public function fetchIntent(string $reference): PaymentIntentStatus
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
-        return PaymentIntentStatus::Captured;
+        return FakeIntents::snapshot($cart, PaymentIntentStatus::Captured);
     }
 
-    public function voidIntent(string $reference): void {}
+    public function voidIntent(Cart $cart, string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
         return new PaymentRefund(success: true, reference: 'refund_'.$reference);
     }

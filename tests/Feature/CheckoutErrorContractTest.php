@@ -17,6 +17,7 @@ use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\Stubs\User;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\WithoutIntentReconciliation;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -135,6 +136,8 @@ it('does not mint a session for the empty cart a signed-in refresh resolves to',
  */
 class FailingIntentGateway extends OfflinePayment implements CreatesPaymentIntents
 {
+    use WithoutIntentReconciliation;
+
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
         throw new RuntimeException('The amount must be greater than or equal to the minimum charge amount. See https://gateway.docs/internal');

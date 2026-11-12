@@ -1,18 +1,23 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Lunar\Checkout\Contracts\Actions\ReconcilesCheckoutSession;
 use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
+use Lunar\Core\Contracts\ReconcilesPaymentIntents;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Facades\Payments;
+use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -20,24 +25,30 @@ uses(TestCase::class, RefreshDatabase::class);
  * A gateway whose intent outcome the test scripts. Extends the offline type so
  * authorize()/refund() satisfy the abstract payment surface.
  */
-class ReleaseTestGateway extends OfflinePayment implements SupportsPaymentIntents
+class ReleaseTestGateway extends OfflinePayment implements ReconcilesPaymentIntents
 {
-    public static PaymentIntentStatus $status = PaymentIntentStatus::Pending;
+    /** Null scripts a reference the gateway did not create for the cart. */
+    public static ?PaymentIntentStatus $status = PaymentIntentStatus::Processing;
 
     public static bool $throwOnFetch = false;
 
-    public function fetchIntent(string $reference): PaymentIntentStatus
+    /** @var array<int, int> */
+    public static array $fetchedCartIds = [];
+
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
+        static::$fetchedCartIds[] = $cart->id;
+
         if (static::$throwOnFetch) {
             throw new PaymentIntentException('gateway unreachable');
         }
 
-        return static::$status;
+        return static::$status ? FakeIntents::snapshot($cart, static::$status) : null;
     }
 
-    public function voidIntent(string $reference): void {}
+    public function voidIntent(Cart $cart, string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
         return new PaymentRefund(success: true, reference: 're_test');
     }
@@ -59,8 +70,32 @@ function pinnedSession(array $overrides = [])
 
 beforeEach(function () {
     Payments::extend('release-test', fn () => app(ReleaseTestGateway::class));
-    ReleaseTestGateway::$status = PaymentIntentStatus::Pending;
+    ReleaseTestGateway::$status = PaymentIntentStatus::Processing;
     ReleaseTestGateway::$throwOnFetch = false;
+    ReleaseTestGateway::$fetchedCartIds = [];
+});
+
+it('counts an attempt when the gateway did not create the reference for the cart', function () {
+    ReleaseTestGateway::$status = null;
+
+    $session = pinnedSession();
+
+    expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('retry');
+
+    $session->refresh();
+
+    expect($session->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(1);
+});
+
+it('counts an attempt without asking the gateway when the cart is gone', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::Captured;
+
+    $session = pinnedSession(['cart_reference' => '999999']);
+
+    expect(app(ReconcilesCheckoutSession::class)->execute($session))->toBe('retry')
+        ->and($session->refresh()->reconciliation_attempts)->toBe(1)
+        ->and(ReleaseTestGateway::$fetchedCartIds)->toBeEmpty();
 });
 
 it('reopens a pinned session when the gateway holds no captured money', function () {
@@ -96,6 +131,19 @@ it('completes instead of releasing when the money was captured', function () {
 
 it('stays frozen when the gateway outcome cannot be confirmed', function () {
     ReleaseTestGateway::$throwOnFetch = true;
+
+    $session = pinnedSession();
+
+    $this->postJson(route('lunar.checkout.payment-release', $session->uuid))
+        ->assertOk()
+        ->assertJsonPath('outcome', 'unconfirmed')
+        ->assertJsonPath('released', false);
+
+    expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class);
+});
+
+it('stays frozen when the gateway did not create the reference for the cart', function () {
+    ReleaseTestGateway::$status = null;
 
     $session = pinnedSession();
 
@@ -209,7 +257,7 @@ it('processing sends a failed payment back to the checkout to retry', function (
 });
 
 it('processing renders the polling page while the outcome is in flight', function () {
-    ReleaseTestGateway::$status = PaymentIntentStatus::Pending;
+    ReleaseTestGateway::$status = PaymentIntentStatus::Processing;
 
     $session = pinnedSession();
 
@@ -222,7 +270,7 @@ it('processing renders the polling page while the outcome is in flight', functio
 });
 
 it('processing shows the same merchant name as the checkout', function () {
-    ReleaseTestGateway::$status = PaymentIntentStatus::Pending;
+    ReleaseTestGateway::$status = PaymentIntentStatus::Processing;
     config(['lunar.checkout.merchant' => 'Edwardes Bros', 'app.name' => 'Lunar Store']);
 
     $session = pinnedSession();

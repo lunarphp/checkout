@@ -14,6 +14,7 @@ use Lunar\Core\Models\Cart;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\WithoutIntentReconciliation;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -23,6 +24,8 @@ uses(TestCase::class, RefreshDatabase::class);
  */
 class ReusedIntentGateway extends OfflinePayment implements CreatesPaymentIntents
 {
+    use WithoutIntentReconciliation;
+
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
         return new PaymentIntentDescriptor('pi_reused_'.$cart->id, 'secret_'.$cart->id);

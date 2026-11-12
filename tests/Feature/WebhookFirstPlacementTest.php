@@ -23,12 +23,15 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\WithoutIntentReconciliation;
 
 uses(TestCase::class, RefreshDatabase::class);
 
 /** A Stripe-like gateway: the browser gets an intent it can confirm directly. */
 class WebhookFirstIntentGateway extends OfflinePayment implements CreatesPaymentIntents
 {
+    use WithoutIntentReconciliation;
+
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
         return new PaymentIntentDescriptor('pi_webhook_first_'.$cart->id, 'secret_'.$cart->id);

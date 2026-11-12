@@ -11,12 +11,14 @@ use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\SyncsPaymentIntents;
+use Lunar\Core\DataObjects\PaymentIntentDescriptor;
 use Lunar\Core\Facades\Payments;
 use Lunar\Core\Models\Cart;
 use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\WithoutIntentReconciliation;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -90,7 +92,14 @@ it('completes the session in place for a method that needs no intent', function 
  */
 class SyncingTestGateway extends OfflinePayment implements SyncsPaymentIntents
 {
+    use WithoutIntentReconciliation;
+
     public static ?int $syncedAmount = null;
+
+    public function createIntent(Cart $cart): PaymentIntentDescriptor
+    {
+        return new PaymentIntentDescriptor('pi_sync_'.$cart->id);
+    }
 
     public function syncIntent(Cart $cart): void
     {

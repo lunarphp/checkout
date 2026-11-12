@@ -15,10 +15,11 @@ use Lunar\Checkout\States\CheckoutSession\Completed;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Core\Contracts\CreatesPaymentIntents;
-use Lunar\Core\Contracts\SupportsPaymentIntents;
 use Lunar\Core\DataObjects\PaymentAuthorize;
 use Lunar\Core\DataObjects\PaymentIntentDescriptor;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PaymentRefund;
+use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Facades\CartSession;
 use Lunar\Core\Facades\Payments;
@@ -27,6 +28,7 @@ use Lunar\Core\Models\Order;
 use Lunar\Core\PaymentTypes\OfflinePayment;
 use Lunar\Tests\Checkout\TestCase;
 use Lunar\Tests\Checkout\Utils\CheckoutCart;
+use Lunar\Tests\Checkout\Utils\FakeIntents;
 
 uses(TestCase::class, RefreshDatabase::class);
 
@@ -34,7 +36,7 @@ uses(TestCase::class, RefreshDatabase::class);
  * A card gateway that records captured money as a Transaction row on the
  * order it authorises against, the way Stripe's UpdateOrderFromIntent does.
  */
-class DraftAtPinGateway extends OfflinePayment implements CreatesPaymentIntents, SupportsPaymentIntents
+class DraftAtPinGateway extends OfflinePayment implements CreatesPaymentIntents
 {
     /** @var array<int, string> */
     public static array $refunds = [];
@@ -44,14 +46,14 @@ class DraftAtPinGateway extends OfflinePayment implements CreatesPaymentIntents,
         return new PaymentIntentDescriptor('pi_draft_'.$cart->id);
     }
 
-    public function fetchIntent(string $reference): PaymentIntentStatus
+    public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
-        return PaymentIntentStatus::Captured;
+        return FakeIntents::snapshot($cart, PaymentIntentStatus::Captured);
     }
 
-    public function voidIntent(string $reference): void {}
+    public function voidIntent(Cart $cart, string $reference): void {}
 
-    public function refundIntent(string $reference, int $amountMinor, string $idempotencyKey): PaymentRefund
+    public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
         static::$refunds[] = $reference;
 
