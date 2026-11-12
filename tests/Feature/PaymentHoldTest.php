@@ -677,6 +677,20 @@ it('voids the hold when an expired session is invalidated', function () {
     expect($session->refresh()->status)->toBeInstanceOf(Cancelled::class);
 });
 
+it('voids the hold of an expired session whose cart was pruned', function () {
+    $session = mintHoldSession();
+    $reference = $session->payment_intent_ref;
+
+    Cart::query()->findOrFail((int) $session->cart_reference)->delete();
+    $session->forceFill(['expires_at' => now()->subMinute()])->save();
+
+    Artisan::call('lunar:checkout:expire-sessions');
+
+    expect(FakeHoldGateway::$voidedReferences)->toBe([$reference])
+        ->and($session->refresh()->status)->toBeInstanceOf(Cancelled::class)
+        ->and($session->active_cart_reference)->toBeNull();
+});
+
 it('voids, never refunds, a stray hold when the driver never supported holds and completion fails', function () {
     $session = mintPinnedHoldSessionWithoutHoldSupport();
 

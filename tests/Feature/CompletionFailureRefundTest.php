@@ -316,3 +316,27 @@ it('refuses to refund in another currency when the store no longer has the pinne
 
     expect(CapturedIntentGateway::$refunds)->toBeEmpty();
 });
+
+it('lets the operator refund a session whose cart was pruned', function () {
+    $session = capturedSession();
+    Cart::query()->findOrFail((int) $session->cart_reference)->delete();
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session, 'refund');
+
+    expect($outcome)->toBe('refunded')
+        ->and(CapturedIntentGateway::$refunds)->toBe([['reference' => 'pi_captured_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP']])
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('refunds a captured payment whose cart was pruned before it could complete', function () {
+    Exceptions::fake();
+    $session = capturedSession();
+    Cart::query()->findOrFail((int) $session->cart_reference)->delete();
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('refunded')
+        ->and(CapturedIntentGateway::$refunds)->toHaveCount(1)
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0);
+});

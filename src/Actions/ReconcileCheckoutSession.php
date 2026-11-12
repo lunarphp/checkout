@@ -54,7 +54,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
         $gateway = $this->gateways->for($session);
         $reference = $session->payment_intent_ref;
-        $cart = Cart::query()->find((int) $session->cart_reference);
+        $cart = $this->gateways->cartFor($session);
 
         if ($resolve !== null) {
             return $this->resolveByOperator($session, $gateway, $cart, $reference, $resolve);
@@ -107,7 +107,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             // An intent exists, so money may exist. Reopen only on the
             // gateway's word that it was not captured; anything unknowable
             // stays frozen and the reconciliation sweep owns it.
-            $cart = Cart::query()->find((int) $session->cart_reference);
+            $cart = $this->gateways->cartFor($session);
 
             if ($gateway === null || $cart === null) {
                 return 'unconfirmed';

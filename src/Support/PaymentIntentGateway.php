@@ -5,6 +5,7 @@ namespace Lunar\Checkout\Support;
 use Lunar\Checkout\Models\CheckoutSession;
 use Lunar\Core\Contracts\ReconcilesPaymentIntents;
 use Lunar\Core\Managers\PaymentManager;
+use Lunar\Core\Models\Cart;
 
 /**
  * Resolves the gateway driver behind a session's in-flight intent, when that
@@ -34,5 +35,15 @@ class PaymentIntentGateway
         }
 
         return $driver instanceof ReconcilesPaymentIntents ? $driver : null;
+    }
+
+    /**
+     * The cart the intent verbs are scoped to, pruned or not. Lunar prunes
+     * idle carts by soft-deleting them, and money held or taken against one
+     * must still be voidable and refundable afterwards.
+     */
+    public function cartFor(CheckoutSession $session): ?Cart
+    {
+        return Cart::query()->withTrashed()->find((int) $session->cart_reference);
     }
 }

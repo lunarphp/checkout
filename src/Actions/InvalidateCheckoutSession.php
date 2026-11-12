@@ -10,7 +10,6 @@ use Lunar\Checkout\States\CheckoutSession\Cancelled;
 use Lunar\Checkout\States\CheckoutSession\Open;
 use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PaymentIntentGateway;
-use Lunar\Core\Models\Cart;
 
 /**
  * Void-first invalidation (spec 0010 §F). No transition to `Cancelled` ever
@@ -29,7 +28,7 @@ final class InvalidateCheckoutSession implements InvalidatesCheckoutSession
     {
         if ($reference = $session->payment_intent_ref) {
             $gateway = $this->gateways->for($session);
-            $cart = Cart::query()->find((int) $session->cart_reference);
+            $cart = $this->gateways->cartFor($session);
 
             if ($gateway === null || $cart === null) {
                 return false;

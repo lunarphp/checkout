@@ -281,6 +281,17 @@ it('stays frozen when the gateway did not create the reference for the cart', fu
     expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class);
 });
 
+it('releases on the gateway\'s word when the cart was pruned', function () {
+    ReleaseTestGateway::$status = PaymentIntentStatus::RequiresAction;
+
+    $session = pinnedSession();
+    Cart::query()->findOrFail((int) $session->cart_reference)->delete();
+
+    expect(app(ReconcilesCheckoutSession::class)->release($session))->toBe('released')
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and(ReleaseTestGateway::$fetchedCartIds)->toBe([(int) $session->cart_reference]);
+});
+
 it('is a no-op on a session that is not pinned', function () {
     $session = CheckoutCart::session(CheckoutCart::orderable());
 
