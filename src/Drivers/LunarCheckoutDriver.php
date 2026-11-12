@@ -605,7 +605,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
         $this->events->dispatch(new CustomerAssociated($session, $customerReference));
 
-        return $this->buildSnapshot($cart);
+        return $this->buildSnapshot($cart->recalculate());
     }
 
     /*

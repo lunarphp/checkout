@@ -316,3 +316,15 @@ it('refuses to complete a pinned session whose cart was repriced behind fresh ca
     Event::assertDispatched(CheckoutCompletionFailed::class, fn (CheckoutCompletionFailed $event): bool => $event->reason === 'verify-mismatch');
     expect($session->refresh()->order_reference)->toBeNull();
 });
+
+it('returns the repriced snapshot when a customer is associated, not the cached one', function () {
+    $session = calculatedSession();
+
+    repriceSessionCart($session, 2500);
+    expectCachedTotalsServable($session, 1000);
+
+    $snapshot = app(CheckoutDriver::class)->associateCustomer($session, '42', 'terry@example.com');
+
+    expect($snapshot->amountTotal)->toBe(2500)
+        ->and($snapshot->fingerprint)->toBe(CheckoutCart::fingerprint($session));
+});
