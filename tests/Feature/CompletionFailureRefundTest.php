@@ -41,6 +41,14 @@ class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentInte
 
     public static bool $refundFails = false;
 
+    public static int $captured = 0;
+
+    /** What the gateway holds as refunded, whatever the caller heard back. */
+    public static int $refunded = 0;
+
+    /** Thrown once the gateway has made the refund: the caller never hears of it. */
+    public static ?Throwable $failAfterRefunding = null;
+
     public function createIntent(Cart $cart): PaymentIntentDescriptor
     {
         return new PaymentIntentDescriptor('pi_captured_'.$cart->id);
@@ -48,7 +56,7 @@ class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentInte
 
     public function fetchIntent(Cart $cart, string $reference): ?PaymentIntentSnapshot
     {
-        return FakeIntents::snapshot($cart, PaymentIntentStatus::Captured);
+        return FakeIntents::snapshot($cart, PaymentIntentStatus::Captured, static::$captured, refunded: static::$refunded);
     }
 
     public function voidIntent(Cart $cart, string $reference): void {}
@@ -59,7 +67,16 @@ class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentInte
             throw new PaymentIntentException('gateway refund failed');
         }
 
+        if (static::$refunded > 0) {
+            throw new PaymentIntentException('nothing left to refund');
+        }
+
         static::$refunds[] = ['reference' => $reference, 'amount' => $amount->value, 'currency' => $amount->resolveCurrency()->code];
+        static::$refunded = $amount->value;
+
+        if (static::$failAfterRefunding !== null) {
+            throw static::$failAfterRefunding;
+        }
 
         return new PaymentRefund(success: true, reference: 'refund_'.$reference);
     }
@@ -96,6 +113,9 @@ class CapturedIntentMethod extends AbstractPaymentMethod
 beforeEach(function () {
     CapturedIntentGateway::$refunds = [];
     CapturedIntentGateway::$refundFails = false;
+    CapturedIntentGateway::$captured = 0;
+    CapturedIntentGateway::$refunded = 0;
+    CapturedIntentGateway::$failAfterRefunding = null;
 
     Payments::extend('captured-intent', fn () => app(CapturedIntentGateway::class));
     app(PaymentMethodRegistry::class)->add(CapturedIntentMethod::class);
@@ -339,4 +359,99 @@ it('refunds a captured payment whose cart was pruned before it could complete', 
         ->and(CapturedIntentGateway::$refunds)->toHaveCount(1)
         ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
         ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0);
+});
+
+it('never places an order on money an earlier pass refunded before it crashed', function () {
+    Exceptions::fake();
+    Event::fake([CheckoutCompletionFailed::class]);
+    $session = capturedSession();
+    CapturedIntentGateway::$captured = $session->amount_total;
+    CapturedIntentGateway::$failAfterRefunding = new RuntimeException('connection lost after the refund landed');
+
+    $placementVetoed = true;
+    Event::listen(OrderPlacing::class, function () use (&$placementVetoed) {
+        if ($placementVetoed) {
+            throw new LogicException('placement vetoed');
+        }
+    });
+
+    expect(fn () => app(ReconcilesCheckoutSession::class)->execute($session))
+        ->toThrow(RuntimeException::class, 'connection lost after the refund landed');
+
+    expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class);
+
+    $placementVetoed = false;
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('refunded')
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBeNull()
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0)
+        ->and(CapturedIntentGateway::$refunds)->toHaveCount(1);
+
+    Event::assertDispatched(
+        CheckoutCompletionFailed::class,
+        fn (CheckoutCompletionFailed $event): bool => $event->reason === 'refunded' && $event->refundReference === null,
+    );
+});
+
+it('reopens instead of retrying a refund whose response was lost', function () {
+    Event::fake([CheckoutCompletionFailed::class]);
+    $session = capturedSession();
+    $session->forceFill(['cart_fingerprint' => 'stale'])->save();
+    CapturedIntentGateway::$captured = $session->amount_total;
+    CapturedIntentGateway::$failAfterRefunding = new PaymentIntentException('refund response lost');
+
+    expect(app(ReconcilesCheckoutSession::class)->execute($session->refresh()))->toBe('retry');
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session->refresh());
+
+    expect($outcome)->toBe('refunded')
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and($session->payment_intent_ref)->toBeNull()
+        ->and(CapturedIntentGateway::$refunds)->toHaveCount(1);
+
+    $reasons = Event::dispatched(CheckoutCompletionFailed::class)
+        ->map(fn (array $arguments): string => $arguments[0]->reason)
+        ->countBy();
+
+    expect($reasons->get('refund-failed'))->toBe(1)
+        ->and($reasons->get('refunded'))->toBe(1);
+
+    Event::assertDispatched(
+        CheckoutCompletionFailed::class,
+        fn (CheckoutCompletionFailed $event): bool => $event->reason === 'refunded' && $event->refundReference === null,
+    );
+});
+
+it('never completes a refunded payment when the customer releases the session', function () {
+    Event::fake([CheckoutCompletionFailed::class]);
+    $session = capturedSession();
+    CapturedIntentGateway::$captured = $session->amount_total;
+    CapturedIntentGateway::$refunded = $session->amount_total;
+
+    $outcome = app(ReconcilesCheckoutSession::class)->release($session);
+
+    expect($outcome)->toBe('refunded')
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0)
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty();
+});
+
+it('leaves a partly refunded payment pinned for the operator', function () {
+    Event::fake([CheckoutCompletionFailed::class]);
+    $session = capturedSession();
+    CapturedIntentGateway::$captured = $session->amount_total;
+    CapturedIntentGateway::$refunded = 100;
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('retry')
+        ->and($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(1)
+        ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0)
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty();
+
+    Event::assertNotDispatched(CheckoutCompletionFailed::class);
 });

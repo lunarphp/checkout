@@ -411,9 +411,17 @@ second order, and the synchronous path creates or adopts it inside `complete()`:
      attempts fire `CheckoutSessionReconciliationStalled`.
      `CheckoutCompletionFailed` fires with a `reason` distinguishing
      **refunded / refund-pending / refund-failed**, carrying the refund
-     reference when one exists. A non-Lunar driver may substitute its own
-     remediation (a backorder, a manual-review hold) but MUST NOT silently
-     retain a charge that produced no order.
+     reference when one exists. A gateway keeps reporting a refunded intent as
+     captured (a Stripe intent stays `succeeded`), so every pass reads the
+     intent snapshot's refunded amount before it completes anything. A fully
+     refunded intent means an earlier pass returned the money and never
+     committed the reopen (it died after the refund, or the gateway's answer
+     was lost): the session moves `→ Open` with `refunded` and no reference,
+     without a second refund call. A partly refunded intent was refunded by
+     someone else and still holds money with no order, so it records an attempt
+     and stalls to the operator. Neither is ever completed. A non-Lunar driver
+     may substitute its own remediation (a backorder, a manual-review hold) but
+     MUST NOT silently retain a charge that produced no order.
    - **The draft survives, unplaced.** Neither a void nor a refund touches the
      order the pin drafted: it stays on the cart with `placed_at` null and no
      session points at it. The next Pay on the reopened session reuses that same

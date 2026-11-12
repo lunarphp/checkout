@@ -19,6 +19,7 @@ use Lunar\Checkout\States\CheckoutSession\PaymentProcessing;
 use Lunar\Checkout\Support\PaymentIntentGateway;
 use Lunar\Core\Contracts\ReconcilesPaymentIntents;
 use Lunar\Core\Contracts\SupportsPaymentHolds;
+use Lunar\Core\DataObjects\PaymentIntentSnapshot;
 use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
@@ -66,10 +67,12 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         }
 
         try {
-            $status = $gateway->fetchIntent($cart, $reference)?->status;
+            $intent = $gateway->fetchIntent($cart, $reference);
         } catch (PaymentIntentException) {
             return $this->recordAttempt($session);
         }
+
+        $status = $intent?->status;
 
         return match ($status) {
             // Not an intent the gateway created for this cart: unknowable.
@@ -88,7 +91,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 : 'pending',
 
             PaymentIntentStatus::Captured,
-            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $cart, $reference, $status),
+            PaymentIntentStatus::RequiresCapture => $this->completeOrRefund($session, $gateway, $cart, $reference, $intent),
 
             PaymentIntentStatus::Voided,
             PaymentIntentStatus::Failed => $this->reopen($session, 'intent_'.$status->value),
@@ -115,21 +118,21 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             }
 
             try {
-                $status = $gateway->fetchIntent($cart, $reference)?->status;
+                $intent = $gateway->fetchIntent($cart, $reference);
             } catch (PaymentIntentException) {
                 return 'unconfirmed';
             }
 
-            if ($status === null) {
+            if ($intent === null) {
                 return 'unconfirmed';
             }
 
-            if (in_array($status, [PaymentIntentStatus::Captured, PaymentIntentStatus::RequiresCapture], true)) {
+            if (in_array($intent->status, [PaymentIntentStatus::Captured, PaymentIntentStatus::RequiresCapture], true)) {
                 // An authorise-only hold at RequiresCapture is not money
                 // moved: the customer may keep editing and re-confirm, so
                 // reopen with the hold intact instead of forcing completion.
-                if (! ($session->isHoldMode() && $status === PaymentIntentStatus::RequiresCapture)) {
-                    return $this->completeOrRefund($session, $gateway, $cart, $reference, $status);
+                if (! ($session->isHoldMode() && $intent->status === PaymentIntentStatus::RequiresCapture)) {
+                    return $this->completeOrRefund($session, $gateway, $cart, $reference, $intent);
                 }
             }
         }
@@ -167,14 +170,27 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
      * (a hold, or a policy-mode requires_capture intent) voids; anything
      * actually captured (a standard intent, or a hold captured by this very
      * call) refunds.
+     *
+     * A gateway keeps reporting a refunded intent as captured, so money an
+     * earlier pass returned is recognised by the refunded amount. A full
+     * refund whose reopen never committed (the pass died, or the gateway's
+     * answer was lost) finishes here without a second refund call. A partial
+     * one is not this class's doing and leaves money with no order, so it
+     * stalls to the operator. Neither ever completes.
      */
     private function completeOrRefund(
         CheckoutSession $session,
         ReconcilesPaymentIntents $gateway,
         Cart $cart,
         string $reference,
-        PaymentIntentStatus $status,
+        PaymentIntentSnapshot $intent,
     ): string {
+        if ($intent->refunded->value > 0) {
+            return $intent->refunded->value >= $intent->captured->value
+                ? $this->moneyBack($session, $gateway, $cart, $reference, captured: true, alreadyRefunded: true)
+                : $this->recordAttempt($session);
+        }
+
         // An authorise-only hold is not money moved yet: capture it now, in
         // the one idempotent place every completion path funnels through, so
         // a crash between pin and capture recovers on the next reconcile.
@@ -219,7 +235,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
             }
         }
 
-        return $this->moneyBack($session, $gateway, $cart, $reference, $holdCaptured || $status === PaymentIntentStatus::Captured);
+        return $this->moneyBack($session, $gateway, $cart, $reference, $holdCaptured || $intent->status === PaymentIntentStatus::Captured);
     }
 
     /**
@@ -236,8 +252,9 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         Cart $cart,
         string $reference,
         bool $captured,
+        bool $alreadyRefunded = false,
     ): string {
-        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $cart, $reference, $captured): array {
+        [$outcome, $event] = $session->getConnection()->transaction(function () use ($session, $gateway, $cart, $reference, $captured, $alreadyRefunded): array {
             $locked = CheckoutSession::query()->whereKey($session->getKey())->lockForUpdate()->firstOrFail();
 
             if ($locked->status instanceof Completed) {
@@ -282,20 +299,27 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 return ['voided', new CheckoutCompletionFailed($session, $holdMode ? 'hold-voided' : 'voided')];
             }
 
-            try {
-                $refund = $gateway->refundIntent(
-                    $cart,
-                    $reference,
-                    $this->pinnedAmount($session),
-                    'lunar-checkout-refund:'.$reference,
-                );
-            } catch (PaymentIntentException) {
-                return ['refund-failed', new CheckoutCompletionFailed($session, 'refund-failed')];
+            // A refund found on the intent has no reference to pass on: the
+            // snapshot carries amounts only, and the call that made it never
+            // returned one.
+            $refundReference = null;
+
+            if (! $alreadyRefunded) {
+                try {
+                    $refundReference = $gateway->refundIntent(
+                        $cart,
+                        $reference,
+                        $this->pinnedAmount($session),
+                        'lunar-checkout-refund:'.$reference,
+                    )->reference;
+                } catch (PaymentIntentException) {
+                    return ['refund-failed', new CheckoutCompletionFailed($session, 'refund-failed')];
+                }
             }
 
             $this->reopen($session, 'refunded');
 
-            return ['refunded', new CheckoutCompletionFailed($session, 'refunded', $refund->reference)];
+            return ['refunded', new CheckoutCompletionFailed($session, 'refunded', $refundReference)];
         });
 
         // Count the attempt before any listener runs, so a throwing
