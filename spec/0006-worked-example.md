@@ -42,7 +42,7 @@ Three packages, one contract ([[0000-overview]]):
   facade, the built-in element impls, the `/checkout/{uuid}/elements/{handle}` Inertia
   multiplexer. (A transport-free `checkout-core` split is an open question — [[0000-overview]].)
 - **`lunar/core`** — the surfaces checkout rides: `Cart::set*`, `ShippingManifest`,
-  `Payments`/`AbstractPayment` (plus the `SupportsPaymentIntents` capability). No checkout code.
+  `Payments`/`AbstractPayment` (plus the `ReconcilesPaymentIntents` capability). No checkout code.
 - **`lunar/api`** — the REST projection of the same DTO (not the spine here; see [[0003-transport-projections]] §A).
 
 This walkthrough uses the **Inertia spine**: the self-contained checkout app renders `<LunarCheckout/>`

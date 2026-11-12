@@ -476,9 +476,10 @@ exists, is voided **before** the terminal transition, and an unabortable /
 unknown-outcome void blocks the terminal transition exactly as above.
 
 Every intent operation in §E.2/§F — fetch, void, refund — goes through the new
-core gateway capability interface `Lunar\Core\Contracts\SupportsPaymentIntents`
-(`fetchIntent(string $ref)`, `voidIntent(string $ref)`, `refundIntent(string
-$ref, int $amount, string $idempotencyKey)`), `instanceof`-checked on the
+core gateway capability interface `Lunar\Core\Contracts\ReconcilesPaymentIntents`
+(`fetchIntent(Cart $cart, string $reference)`, `voidIntent(Cart $cart, string
+$reference)`, `refundIntent(Cart $cart, string $reference, PriceValue $amount,
+string $idempotencyKey)`), `instanceof`-checked on the
 gateway driver ([[0002-payment-methods-and-driver]] carries the seam detail). A
 gateway that does not implement it cannot void — its session stays
 `PaymentProcessing` and resolves through the stall protocol below.
@@ -578,7 +579,7 @@ states (`Expired`, etc.); the table does not duplicate those.
   `src/DataObjects/` (`Lunar\Checkout\DataObjects\…`).
 - **Driver surface:** the §B verbs added to `CheckoutDriver`, plus the mandatory
   `AbstractCheckoutDriver` base class (§B). New core gateway capability
-  interface `Lunar\Core\Contracts\SupportsPaymentIntents` (§F).
+  interface `Lunar\Core\Contracts\ReconcilesPaymentIntents` (§F).
 - **Session API:** `hasDrifted()`, `putElementData()` / `getElementData()`.
 - **Actions:** `SyncCheckoutSession` (guarded single-statement re-sync while
   `Open`, §D), `InvalidateCheckoutSession` (void-first → `Cancelled` + reason,
@@ -763,6 +764,6 @@ states (`Expired`, etc.); the table does not duplicate those.
 - `Lunar\Core\Models\Cart::setShippingAddress()` / `setBillingAddress()` /
   `setShippingOption()`,
   `Lunar\Core\Validation\Cart\ValidateCartForOrderCreation`,
-  `Lunar\Core\Contracts\SupportsPaymentIntents` (new, §F). Core's
+  `Lunar\Core\Contracts\ReconcilesPaymentIntents` (new, §F). Core's
   `Cart::fingerprint()` / `checkFingerprint()` / `GeneratesFingerprint` dedupe
   machinery is explicitly **not** a dependency (§D).

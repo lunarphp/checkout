@@ -42,11 +42,11 @@ session state. The state machine tracks money-safety states, not UI location.
 
 ### A. `SupportsPaymentHolds` (core capability)
 
-New opt-in contract in `lunar/core` beside `CreatesPaymentIntents` / `SupportsPaymentIntents` /
+New opt-in contract in `lunar/core` beside `CreatesPaymentIntents` / `ReconcilesPaymentIntents` /
 `SyncsPaymentIntents`, checked via `instanceof`, never a required part of `PaymentType`:
 
 ```php
-interface SupportsPaymentHolds
+interface SupportsPaymentHolds extends ReconcilesPaymentIntents
 {
     /**
      * Create (or resume) the cart's authorise-only intent: capture deferred,
@@ -60,19 +60,19 @@ interface SupportsPaymentHolds
      * hold now covers it; NeedsReauthorization when this hold cannot stretch
      * (the customer re-opens the wallet for a fresh authorisation).
      */
-    public function adjustHold(string $reference, int $amountMinor): HoldAdjustment;
+    public function adjustHold(Cart $cart, string $reference, PriceValue $amount): HoldAdjustment;
 
     /**
      * Capture an authorised hold for the final amount (<= authorised).
      * Idempotent per reference. MUST throw when the gateway cannot confirm
      * the capture; an unknown outcome is not a capture.
      */
-    public function captureHold(string $reference, int $amountMinor): void;
+    public function captureHold(Cart $cart, string $reference, PriceValue $amount): void;
 }
 ```
 
 - `HoldAdjustment` is an enum: `Ok | NeedsReauthorization`.
-- Releasing a hold is the existing `SupportsPaymentIntents::voidIntent()`; no new verb.
+- Releasing a hold is the existing `ReconcilesPaymentIntents::voidIntent()`; no new verb.
 - **Express eligibility** = `$method->supportsExpress() && $driver instanceof SupportsPaymentHolds
   && $method->isAvailable($cart)`. A gateway that cannot hold cannot be express; the squeeze
   page's "not charged until you confirm" promise is only honest with a hold.

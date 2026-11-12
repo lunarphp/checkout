@@ -26,7 +26,7 @@ Three delivery/customisation tiers:
 | Package | Role |
 |---|---|
 | `lunar/checkout` | Everything checkout: the transport-agnostic element model, `CheckoutData` DTO, `CheckoutSession` + the swappable `CheckoutDriver` (default `LunarCheckoutDriver`), `PaymentMethod` registry — **and** the self-contained Inertia app: `<LunarCheckout>`, registry, `CheckoutProvider`, composables, built-in elements, the `CheckoutAssets` extension seam, prebuilt `dist/`. (A transport-free `checkout-core` split is an open question — 0000.) |
-| `lunar/core` | The seams checkout rides: `Cart::set*`, `ShippingManifest`, `Payments`/`AbstractPayment` — plus the `SupportsPaymentIntents` capability contract (0010). No checkout code. |
+| `lunar/core` | The seams checkout rides: `Cart::set*`, `ShippingManifest`, `Payments`/`AbstractPayment`, plus the `ReconcilesPaymentIntents` capability contract (0010). No checkout code. |
 | `lunar/api` | REST projection of the same DTO (JSON:API envelope, Sanctum, headers). |
 | `storefront-ui` | Reference host app with `lunar/checkout` installed (demos install-and-go). |
 | hosted (future) | The **same** app under a Lunar-operated deployment, rendering a session by UUID. |
@@ -116,7 +116,7 @@ Three delivery/customisation tiers:
   not portable to MySQL); all persisted session writes are single-statement guarded UPDATEs, with the
   guarded-transition helper as the concurrency layer over the spatie machine (the legality layer);
   gate step 0 (live currency/channel must equal pinned); the sync path runs the gate inside
-  `complete()`'s order transaction; the `SupportsPaymentIntents` core capability seam
+  `complete()`'s order transaction; the `ReconcilesPaymentIntents` core capability seam
   (fetch/void/refund by intent); the stall protocol + `lunar:checkout:reconcile` operator resolve;
   consistent-read completion + idempotent `complete()`; new transport verbs (`POST /checkout/{uuid}/pay`,
   `/contact`, `/elements/{handle}`); `CheckoutData` gains session-level fields (sessionUuid, status,
@@ -145,11 +145,11 @@ Three delivery/customisation tiers:
   CI/release build step.
 - **Dual-Inertia coexistence** (0008 open question) — if the consumer's storefront also runs Inertia, two
   apps share a page lifecycle. Expected fine (separate root/manifest/namespace) but unverified.
-- **0010 — `SupportsPaymentIntents` is new public surface in `lunar/core`.** Small and additive
+- **0010: `ReconcilesPaymentIntents` is new public surface in `lunar/core`.** Small and additive
   (`Contracts/`, fetch/void/refund by intent), but contract on landing — confirm the verb shape
   before gateway drivers adopt it, because changing it later needs a spec + Rector rule.
 - **Gateway adoption of the capability interface.** The void-first/reconcile/refund-by-intent
-  protocol only works for gateways implementing `SupportsPaymentIntents`; gateways without it flow
+  protocol only works for gateways implementing `ReconcilesPaymentIntents`; gateways without it flow
   into the stall protocol (stalled event → low-frequency retries → operator resolve). Confirm that
   degraded path is acceptable for the gateways merchants actually run.
 - **0000 — the transport-free `checkout-core` split is unresolved.** Until it is, a REST-only

@@ -48,7 +48,7 @@ lunar/checkout     Everything checkout. The element model: capability interfaces
                    elements/gateways contribute Vue UI via runtime chunks, no rebuild (0009).
    │
    ├── lunar/core       The seams checkout rides: the cart API (Cart::set*), ShippingManifest,
-   │                    Payments/AbstractPayment — plus ONE addition, the SupportsPaymentIntents
+   │                    Payments/AbstractPayment, plus ONE addition, the ReconcilesPaymentIntents
    │                    capability contract (fetch/void/refund by intent) gateway drivers adopt
    │                    for the integrity protocol (0010). No checkout code.
    │
@@ -91,7 +91,7 @@ client.
 | 0009 | Frontend element extension | How third-party elements/gateways contribute Vue UI into the prebuilt app at runtime — `CheckoutAssets` registry, contributed ES-module chunks served same-origin, shared Vue + SDK via `window.Vue`/`window.Lunar` externals, build preset, version/fallback; first-party gateways prebuilt |
 | 0006 | Worked example (guide) | End-to-end walkthrough of one reference checkout through the Inertia spine — element impl, registration, session, DTO, Vue render, payment method, completion. Illustrative, not normative |
 | 0007 | Discount element | Resolves 0001's open question: discount is a `Summary`-region `CapturesData` element; adds an additive `Cart::setCoupon()` so it persists through the cart API |
-| 0010 | Cart–session reconciliation | Backend-neutral session data model (no Lunar FKs; store only non-derivable); the full `CheckoutDriver` store/read surface; element bag; **driver-owned fingerprint + sync-while-Open + pin-and-confirm-at-pay** integrity with the completion re-verify + refund invariant; void-first invalidation on every terminalizing transition; one-active-session-per-cart via guarded unique-column concurrency; the `SupportsPaymentIntents` gateway seam; bounded `PaymentProcessing` reconciliation + stall protocol; lifecycle events |
+| 0010 | Cart–session reconciliation | Backend-neutral session data model (no Lunar FKs; store only non-derivable); the full `CheckoutDriver` store/read surface; element bag; **driver-owned fingerprint + sync-while-Open + pin-and-confirm-at-pay** integrity with the completion re-verify + refund invariant; void-first invalidation on every terminalizing transition; one-active-session-per-cart via guarded unique-column concurrency; the `ReconcilesPaymentIntents` gateway seam; bounded `PaymentProcessing` reconciliation + stall protocol; lifecycle events |
 
 ### Cross-cutting decisions (apply to all specs)
 
@@ -155,7 +155,7 @@ client.
   landing; future breaking changes require a spec + Rector rule per the package rule.
 - The checkout concern lives in its own `packages/checkout` sub-package (`Lunar\Checkout\…`), not
   a new core `Checkout/` folder — core's spec-0013 list is untouched; core gains only the
-  `SupportsPaymentIntents` capability contract (`Contracts/`, additive).
+  `ReconcilesPaymentIntents` capability contract (`Contracts/`, additive).
 - Depends on the planned `public_id` (ULID) and Region/`StorefrontContext` TODO items; until they
   land, cart identity stays resolved server-side via `CartSession` and the country list stays
   channel-scoped.
@@ -184,7 +184,7 @@ client.
   ([[0008-checkout-ui-and-theming]]). It is **not** embedded into a consumer's Vue build;
   any storefront stack links to it. `storefront-ui` is a reference host with it installed. The
   Lunar-hosted page ([[0005-hosted-checkout]]) is the same app under a Lunar-operated deployment.
-  Core gains only the `SupportsPaymentIntents` capability contract.
+  Core gains only the `ReconcilesPaymentIntents` capability contract.
 - A transport-free **`checkout-core` split** (element model + session + driver, no Inertia/Vue) so
   a REST-only consumer (`lunar/api`) need not depend on the Inertia app package — recorded as an
   open question, not done now. (Owner: package maintainer.)
