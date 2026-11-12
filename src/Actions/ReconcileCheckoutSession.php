@@ -23,6 +23,7 @@ use Lunar\Core\DataObjects\PriceValue;
 use Lunar\Core\Enums\PaymentIntentStatus;
 use Lunar\Core\Exceptions\PaymentIntentException;
 use Lunar\Core\Models\Cart;
+use Lunar\Core\Models\Currency;
 use Lunar\Core\Models\Order;
 
 /**
@@ -159,7 +160,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
 
         if ($session->isHoldMode() && $gateway instanceof SupportsPaymentHolds) {
             try {
-                $gateway->captureHold($cart, $reference, $this->pinnedAmount($session, $cart));
+                $gateway->captureHold($cart, $reference, $this->pinnedAmount($session));
                 $holdCaptured = true;
             } catch (PaymentIntentException $e) {
                 report($e);
@@ -260,7 +261,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
                 $refund = $gateway->refundIntent(
                     $cart,
                     $reference,
-                    $this->pinnedAmount($session, $cart),
+                    $this->pinnedAmount($session),
                     'lunar-checkout-refund:'.$reference,
                 );
             } catch (PaymentIntentException) {
@@ -323,7 +324,7 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         $refund = $gateway->refundIntent(
             $cart,
             $reference,
-            $this->pinnedAmount($session, $cart),
+            $this->pinnedAmount($session),
             'lunar-checkout-refund:'.$reference,
         );
 
@@ -398,9 +399,22 @@ final class ReconcileCheckoutSession implements ReconcilesCheckoutSession
         return $session->payment_processing_at?->lte(now()->subMinutes($minutes)) ?? true;
     }
 
-    private function pinnedAmount(CheckoutSession $session, Cart $cart): PriceValue
+    /**
+     * The pinned total in the currency it was pinned in. The cart's currency
+     * may have changed since, and a gateway refuses an amount in another
+     * currency from the intent's, or missizes it.
+     *
+     * @throws PaymentIntentException when the store no longer has that
+     *                                currency, rather than guess another
+     */
+    private function pinnedAmount(CheckoutSession $session): PriceValue
     {
-        return new PriceValue((int) $session->amount_total, $cart->currency);
+        $currency = Currency::query()->where('code', $session->currency_code)->first()
+            ?? throw new PaymentIntentException(
+                "Checkout session [{$session->uuid}] was pinned in [{$session->currency_code}], which this store no longer has.",
+            );
+
+        return new PriceValue((int) $session->amount_total, $currency);
     }
 
     private function recordAttempt(CheckoutSession $session): string

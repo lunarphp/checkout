@@ -36,7 +36,7 @@ uses(TestCase::class, RefreshDatabase::class);
 
 class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentIntents
 {
-    /** @var array<int, array{reference: string, amount: int}> */
+    /** @var array<int, array{reference: string, amount: int, currency: string}> */
     public static array $refunds = [];
 
     public static bool $refundFails = false;
@@ -59,7 +59,7 @@ class CapturedIntentGateway extends OfflinePayment implements CreatesPaymentInte
             throw new PaymentIntentException('gateway refund failed');
         }
 
-        static::$refunds[] = ['reference' => $reference, 'amount' => $amount->value];
+        static::$refunds[] = ['reference' => $reference, 'amount' => $amount->value, 'currency' => $amount->resolveCurrency()->code];
 
         return new PaymentRefund(success: true, reference: 'refund_'.$reference);
     }
@@ -127,7 +127,7 @@ it('refunds and reopens when the order cannot be built after the money was captu
     $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
 
     expect($outcome)->toBe('refunded')
-        ->and(CapturedIntentGateway::$refunds)->toBe([['reference' => 'pi_captured_pinned', 'amount' => $session->amount_total]])
+        ->and(CapturedIntentGateway::$refunds)->toBe([['reference' => 'pi_captured_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP']])
         ->and($session->refresh()->status)->toBeInstanceOf(Open::class)
         ->and(Order::query()->whereNotNull('placed_at')->count())->toBe(0);
 
@@ -273,4 +273,46 @@ it('counts the attempt even when a listener throws on a failed refund', function
 
     expect($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
         ->and($session->reconciliation_attempts)->toBe(1);
+});
+
+it('refunds in the currency the session was pinned in after the cart changed currency', function () {
+    $session = capturedSession();
+    CheckoutCart::changeCurrency(Cart::query()->findOrFail((int) $session->cart_reference), 'EUR');
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session);
+
+    expect($outcome)->toBe('refunded')
+        ->and(CapturedIntentGateway::$refunds)->toBe([['reference' => 'pi_captured_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP']])
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('refunds in the currency the session was pinned in when the operator forces the refund', function () {
+    $session = capturedSession();
+    CheckoutCart::changeCurrency(Cart::query()->findOrFail((int) $session->cart_reference), 'EUR');
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session, 'refund');
+
+    expect($outcome)->toBe('refunded')
+        ->and(CapturedIntentGateway::$refunds)->toBe([['reference' => 'pi_captured_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP']])
+        ->and($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('refuses to refund in another currency when the store no longer has the pinned one', function () {
+    Event::fake([CheckoutCompletionFailed::class]);
+    $session = capturedSession();
+    $session->forceFill(['currency_code' => 'USD', 'cart_fingerprint' => 'stale'])->save();
+
+    $outcome = app(ReconcilesCheckoutSession::class)->execute($session->refresh());
+
+    expect($outcome)->toBe('retry')
+        ->and(CapturedIntentGateway::$refunds)->toBeEmpty()
+        ->and($session->refresh()->status)->toBeInstanceOf(PaymentProcessing::class)
+        ->and($session->reconciliation_attempts)->toBe(1);
+
+    Event::assertDispatched(CheckoutCompletionFailed::class, fn (CheckoutCompletionFailed $event): bool => $event->reason === 'refund-failed');
+
+    expect(fn () => app(ReconcilesCheckoutSession::class)->execute($session, 'refund'))
+        ->toThrow(PaymentIntentException::class, 'USD');
+
+    expect(CapturedIntentGateway::$refunds)->toBeEmpty();
 });

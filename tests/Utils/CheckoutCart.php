@@ -146,6 +146,29 @@ class CheckoutCart
         return $cart->refresh();
     }
 
+    /**
+     * The shopper switched currency after the session pinned its own: the
+     * cart moves to `$code`, priced there, while the session keeps the old one.
+     */
+    public static function changeCurrency(Cart $cart, string $code): Cart
+    {
+        $currency = Currency::factory()->createQuietly(['code' => $code, 'default' => false, 'decimal_places' => 2]);
+
+        foreach ($cart->lines()->get() as $line) {
+            Price::factory()->create([
+                'price' => 1000,
+                'min_quantity' => 1,
+                'currency_id' => $currency->id,
+                'priceable_type' => $line->purchasable_type,
+                'priceable_id' => $line->purchasable_id,
+            ]);
+        }
+
+        $cart->update(['currency_id' => $currency->id]);
+
+        return $cart->refresh();
+    }
+
     public static function session(Cart $cart): CheckoutSession
     {
         return app(CheckoutDriver::class)->createSession($cart);

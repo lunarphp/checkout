@@ -57,7 +57,7 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
     /** @var array<int, array{cart: int, reference: string, amount: int, currency: string, unplaced_orders: array<int, int>}> */
     public static array $captureCalls = [];
 
-    /** @var array<int, array{reference: string, amount: int}> */
+    /** @var array<int, array{reference: string, amount: int, currency: string}> */
     public static array $refundCalls = [];
 
     public static int $holdSequence = 0;
@@ -141,7 +141,7 @@ class FakeHoldGateway extends OfflinePayment implements CreatesPaymentIntents, S
 
     public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
-        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amount->value];
+        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amount->value, 'currency' => $amount->resolveCurrency()->code];
 
         return new PaymentRefund(success: true, reference: 'refund_fake_'.$reference);
     }
@@ -160,7 +160,7 @@ class IntentOnlyGateway extends OfflinePayment implements CreatesPaymentIntents
     /** @var array<int, string> */
     public static array $voidedReferences = [];
 
-    /** @var array<int, array{reference: string, amount: int}> */
+    /** @var array<int, array{reference: string, amount: int, currency: string}> */
     public static array $refundCalls = [];
 
     public static PaymentIntentStatus $fetchStatus = PaymentIntentStatus::RequiresCapture;
@@ -182,7 +182,7 @@ class IntentOnlyGateway extends OfflinePayment implements CreatesPaymentIntents
 
     public function refundIntent(Cart $cart, string $reference, PriceValue $amount, string $idempotencyKey): PaymentRefund
     {
-        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amount->value];
+        static::$refundCalls[] = ['reference' => $reference, 'amount' => $amount->value, 'currency' => $amount->resolveCurrency()->code];
 
         return new PaymentRefund(success: true, reference: 'refund_intent_only_'.$reference);
     }
@@ -601,6 +601,20 @@ it('refunds, never voids, when completion fails after the hold was already captu
         ->and(FakeHoldGateway::$voidedReferences)->toBeEmpty();
 
     expect($session->refresh()->status)->toBeInstanceOf(Open::class);
+});
+
+it('captures and refunds a hold in the currency the session was pinned in after the cart changed currency', function () {
+    $session = mintPinnedHoldSession();
+    FakeHoldGateway::$fetchStatus = PaymentIntentStatus::RequiresCapture;
+
+    CheckoutCart::changeCurrency(Cart::query()->findOrFail((int) $session->cart_reference), 'EUR');
+
+    $this->get(route('lunar.checkout.processing', $session->uuid));
+
+    expect(Arr::only(FakeHoldGateway::$captureCalls[0] ?? [], ['reference', 'amount', 'currency']))
+        ->toBe(['reference' => 'hold_fake_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP'])
+        ->and(FakeHoldGateway::$refundCalls)
+        ->toBe([['reference' => 'hold_fake_pinned', 'amount' => $session->amount_total, 'currency' => 'GBP']]);
 });
 
 it('refunds the captured hold when completion throws for any reason', function () {
