@@ -63,7 +63,9 @@ interface CheckoutDriver
     public function complete(CheckoutSession $session, ?string $confirmationToken = null): mixed;
 
     /**
-     * Live, never-persisted view of the source cart (0010 §B). Reads never write.
+     * Live view of the source cart (0010 §B), built from freshly calculated
+     * totals. The snapshot itself is never persisted, but calculating it
+     * writes core's totals cache columns on the cart row.
      */
     public function snapshot(CheckoutSession $session): CartSnapshot;
 
