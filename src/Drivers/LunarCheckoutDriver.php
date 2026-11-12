@@ -673,6 +673,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
         $cart = $this->resolveCart($session)->calculate();
 
         return $cart->lines
+            ->loadMorph('purchasable', [ProductVariant::class => ['product.thumbnail', 'images']])
             ->map(fn ($line): array => [
                 'identifier' => (string) $line->id,
                 'description' => $line->purchasable?->getDescription(),
@@ -724,7 +725,7 @@ class LunarCheckoutDriver extends AbstractCheckoutDriver
 
     private function resolveCart(CheckoutSession $session): Cart
     {
-        $cart = Cart::query()->find((int) $session->cart_reference);
+        $cart = Cart::query()->with('lines.purchasable')->find((int) $session->cart_reference);
 
         if ($cart === null) {
             throw new CheckoutSessionNotOperableException('The session\'s source cart no longer exists.');
